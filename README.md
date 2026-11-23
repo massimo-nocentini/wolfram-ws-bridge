@@ -32,6 +32,7 @@ needs its normal Wolfram Engine license.
 | `kernel/allowlist.txt` | the `System`` functions clients may use |
 | `kernel/wolframkernel-udocker` | runs the kernel inside the `wlengine` udocker container |
 | `Dockerfile`, `.github/workflows/docker.yml` | server image on top of the official Wolfram Engine image, built and published to GHCR by GitHub Actions |
+| `Dockerfile.raspberrypi` | arm64 server image for a Raspberry Pi, with the Wolfram Engine for Raspberry Pi; built locally on the Pi, never published |
 | `tests/` | codec tests against the kernel, Python and Node end-to-end tests, limits test |
 
 ## Setup
@@ -69,8 +70,10 @@ Engine: the `Dockerfile` adds Python, the server, the kernel files and `web/` to
 official `wolframresearch/wolframengine:15.0` image (build argument `WOLFRAM_ENGINE_IMAGE`). The
 workflow `.github/workflows/docker.yml` builds it for every push and pull request and publishes it
 for pushes to `main` (tags `main` and `sha-<commit>`) and for tags `v<version>` (tag `<version>`).
-GHCR packages start private; the image contains the Wolfram Engine, so check Wolfram's license
-terms before making it public.
+A package published from a public repository is public. The image contains the Wolfram Engine:
+unless Wolfram's license terms allow redistributing it, make the package private (the package's
+settings on GitHub, "Change visibility") and pull it after `docker login ghcr.io` with a token
+that has the `read:packages` scope.
 
 The image has no license. Mount an activated `Licensing` folder over the container user's one:
 
@@ -96,6 +99,33 @@ docker run --rm -p 127.0.0.1:18000:18000 -e WSBRIDGE_TOKEN=change-me \
 - `tini` is PID 1 and reaps the front-end processes of replaced kernels; `docker stop` stops
   the server and its kernels.
 - Build it yourself with `docker build -t wolfram-ws-bridge .` (the base image is 3.3 GB).
+
+### Raspberry Pi (arm64)
+
+Wolfram publishes its Docker image for x86-64 only (`docker run --platform linux/amd64` runs it on
+other machines through emulation, slowly). On a Raspberry Pi, `Dockerfile.raspberrypi` builds a
+native arm64 image instead: Debian bookworm with the `wolfram-engine` package from Raspberry Pi's
+apt repository (used for that package only) and the same server layers. Build it on the Pi:
+
+```sh
+docker build -f Dockerfile.raspberrypi --build-arg WOLFRAM_RPI_EULA=accept -t wolfram-ws-bridge:rpi .
+docker run --rm -p 127.0.0.1:18000:18000 -e WSBRIDGE_TOKEN=change-me \
+  -v wsb-licensing:/home/wolframengine/.WolframEngine/Licensing wolfram-ws-bridge:rpi
+```
+
+- That Wolfram Engine comes under the [Wolfram - Raspberry Pi Bundle License
+  Agreement](http://www.wolfram.com/legal/agreements/wolfram-mathematica-raspberry-pi.html), which
+  the build accepts with `WOLFRAM_RPI_EULA=accept` (without it the build stops): personal or
+  educational use on a Raspberry Pi only, no commercial use, no redistribution (do not push the
+  image anywhere), and no access by other users through a web server. The GitHub workflow does
+  not build this image.
+- The download is about 2.2 GB and the installed engine 5.3 GB; leave about 10 GB free.
+- The engine is version 15.0.1 (15.0 in the x86-64 image).
+- If the kernel does not start (`No valid password found.` in the server's log), the engine may
+  not see that it runs on a Pi: Docker hides `/sys/firmware`, where the device tree is. Try
+  `--security-opt systempaths=unconfined`, or activate once with the volume mounted:
+  `docker run -it --rm -v wsb-licensing:/home/wolframengine/.WolframEngine/Licensing
+  --entrypoint wolframscript wolfram-ws-bridge:rpi -activate`.
 
 ## Use from JavaScript
 

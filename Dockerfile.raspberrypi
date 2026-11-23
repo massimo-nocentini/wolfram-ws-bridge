@@ -1,0 +1,64 @@
+# The bridge server for a Raspberry Pi (arm64), with the Wolfram Engine from Raspberry Pi's
+# apt repository. Build it on the Pi, for yourself:
+#
+#   docker build -f Dockerfile.raspberrypi --build-arg WOLFRAM_RPI_EULA=accept -t wolfram-ws-bridge:rpi .
+#   docker run --rm -p 127.0.0.1:18000:18000 -e WSBRIDGE_TOKEN=... wolfram-ws-bridge:rpi
+#
+# That Wolfram Engine comes under the "Wolfram - Raspberry Pi Bundle License Agreement"
+# (http://www.wolfram.com/legal/agreements/wolfram-mathematica-raspberry-pi.html): personal or
+# educational use on a Raspberry Pi only, no commercial use, no redistribution, and no access by
+# other users through a web server. Building with WOLFRAM_RPI_EULA=accept accepts it. Do not push
+# this image to a registry. The GitHub workflow does not build it.
+#
+# Arguments after the image name go to server/bridge.py, as with the main Dockerfile.
+
+FROM --platform=linux/arm64 debian:bookworm-slim
+
+ARG WOLFRAM_RPI_EULA
+RUN if [ "$WOLFRAM_RPI_EULA" != accept ]; then \
+      echo "Building this image installs the Wolfram Engine for Raspberry Pi, which needs the" >&2; \
+      echo "Wolfram - Raspberry Pi Bundle License Agreement. Read it, then build with" >&2; \
+      echo "--build-arg WOLFRAM_RPI_EULA=accept." >&2; \
+      exit 1; \
+    fi
+
+# Raspberry Pi's repository at a low priority: it never replaces Debian's packages, and
+# wolfram-engine, which only it has, still installs from it
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+ && curl -fsSL https://archive.raspberrypi.com/debian/raspberrypi.gpg.key \
+    | gpg --dearmor -o /usr/share/keyrings/raspberrypi-archive.gpg \
+ && echo "deb [signed-by=/usr/share/keyrings/raspberrypi-archive.gpg] https://archive.raspberrypi.com/debian bookworm main" \
+    > /etc/apt/sources.list.d/raspberrypi.list \
+ && printf '%s\n' 'Package: *' 'Pin: origin archive.raspberrypi.com' 'Pin-Priority: 100' \
+    > /etc/apt/preferences.d/raspberrypi \
+ && apt-get purge -y --auto-remove curl gnupg \
+ && rm -rf /var/lib/apt/lists/*
+
+# the package asks for the agreement through debconf; WOLFRAM_RPI_EULA=accept answered it above.
+# About 2.2 GB to download and 5.3 GB installed.
+RUN echo "wolfram-engine shared/accepted-wolfram-eula boolean true" | debconf-set-selections \
+ && apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    wolfram-engine python3 python3-venv tini \
+ && apt-get clean && rm -rf /var/lib/apt/lists/* \
+ && test -x /usr/bin/WolframKernel
+
+# the same user and home as the official image, so the Licensing mount path is the same
+RUN useradd --create-home --shell /bin/bash wolframengine
+
+WORKDIR /opt/wolfram-ws-bridge
+COPY requirements.txt .
+RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+
+COPY server/ server/
+COPY kernel/WSBridge.wl kernel/allowlist.txt kernel/
+COPY web/ web/
+RUN mkdir run && chown wolframengine:wolframengine run \
+ && /opt/venv/bin/python server/bridge.py --help > /dev/null
+
+USER wolframengine
+ENV PYTHONUNBUFFERED=1
+EXPOSE 18000
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/venv/bin/python", "server/bridge.py", \
+            "--host", "0.0.0.0", "--kernel", "/usr/bin/WolframKernel"]
