@@ -1,0 +1,48 @@
+# System` symbols a client may use. Anything else (file and network access, Set, ToExpression,
+# Symbol, Run, Import, ...) is refused before evaluation. Global` symbols without definitions
+# (plain variables such as x) are always allowed. One name per line; # starts a comment.
+
+# structure
+List Rule RuleDelayed Association HoldComplete Hold HoldForm Rational Complex
+Function Slot SlotSequence Pattern Blank BlankSequence BlankNullSequence Condition Alternatives Optional
+ReplaceAll ReplaceRepeated Replace ReplacePart Apply Map MapIndexed MapThread Thread Through Nest NestList FixedPoint Fold FoldList Composition Identity
+Part Span All None Automatic Null Infinity ComplexInfinity DirectedInfinity Indeterminate True False
+
+# arithmetic and logic
+Plus Times Power Subtract Minus Divide Sqrt CubeRoot Surd Abs Sign Re Im Conjugate Arg Floor Ceiling Round IntegerPart FractionalPart Mod Quotient
+Equal Unequal Less LessEqual Greater GreaterEqual And Or Not Xor Implies Nand Nor Boole If Piecewise Max Min
+Element NotElement Reals Integers Complexes Rationals Primes Algebraics Booleans
+
+# constants
+Pi E I Degree EulerGamma GoldenRatio Catalan Khinchin Glaisher
+
+# elementary and special functions
+Exp Log Log2 Log10 Sin Cos Tan Cot Sec Csc ArcSin ArcCos ArcTan ArcCot ArcSec ArcCsc
+Sinh Cosh Tanh Coth Sech Csch ArcSinh ArcCosh ArcTanh ArcCoth ArcSech ArcCsch Sinc
+Gamma LogGamma Beta PolyGamma Zeta PolyLog Erf Erfc Erfi InverseErf ExpIntegralEi ExpIntegralE SinIntegral CosIntegral LogIntegral
+BesselJ BesselY BesselI BesselK AiryAi AiryBi Hypergeometric0F1 Hypergeometric1F1 Hypergeometric2F1 HypergeometricPFQ
+LegendreP LegendreQ HermiteH LaguerreL ChebyshevT ChebyshevU GegenbauerC JacobiP SphericalHarmonicY
+EllipticK EllipticE EllipticF EllipticPi JacobiSN JacobiCN JacobiDN ProductLog DiracDelta HeavisideTheta UnitStep KroneckerDelta
+Factorial Factorial2 Binomial Multinomial Pochhammer Fibonacci LucasL BernoulliB EulerE StirlingS1 StirlingS2 HarmonicNumber
+
+# number theory
+GCD LCM PrimeQ Prime PrimePi NextPrime FactorInteger Divisors DivisorSigma EulerPhi MoebiusMu PowerMod ModularInverse IntegerDigits FromDigits IntegerQ EvenQ OddQ
+ChineseRemainder ContinuedFraction Rationalize Numerator Denominator
+
+# algebra
+Simplify FullSimplify Refine Expand ExpandAll Factor Together Apart Cancel Collect TrigExpand TrigReduce TrigFactor TrigToExp ExpToTrig PowerExpand ComplexExpand FunctionExpand
+PolynomialQ PolynomialGCD PolynomialLCM PolynomialQuotient PolynomialRemainder PolynomialReduce Resultant Discriminant GroebnerBasis Coefficient CoefficientList Exponent Variables
+Solve NSolve Reduce FindInstance Eliminate Roots Root RootReduce ToRadicals Assumptions Assuming
+
+# calculus
+D Dt Derivative Integrate NIntegrate Limit Series SeriesCoefficient Normal Sum NSum Product NProduct DSolve DSolveValue NDSolve NDSolveValue RSolve RSolveValue
+LaplaceTransform InverseLaplaceTransform FourierTransform InverseFourierTransform ZTransform InverseZTransform Residue Grad Div Curl Laplacian
+Minimize Maximize NMinimize NMaximize FindMinimum FindMaximum FindRoot Interpolation
+
+# linear algebra and lists
+Dot Cross Outer Inner Transpose Inverse Det Tr MatrixRank NullSpace RowReduce LinearSolve Eigenvalues Eigenvectors Eigensystem CharacteristicPolynomial
+IdentityMatrix DiagonalMatrix ConstantArray Table Range Array Length Dimensions Total Accumulate Differences Reverse Sort Union Join Flatten Partition Take Drop First Last Rest Most Select Count Tuples Subsets Permutations
+Norm Normalize MatrixPower MatrixExp SingularValueDecomposition LUDecomposition QRDecomposition CholeskyDecomposition Mean Median Variance StandardDeviation
+
+# numerics and conversion
+N Chop Precision Accuracy SetPrecision NumberQ NumericQ ExactNumberQ InexactNumberQ RealDigits ToString InputForm FullForm TraditionalForm TeXForm StandardForm

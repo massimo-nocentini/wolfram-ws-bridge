@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Runs WolframKernel inside the udocker container, passing all arguments through.
+# The repository and the directory of every -initfile argument are bound into the container at
+# the same path, and the host license folder is bound over the container user's one.
+set -euo pipefail
+container=${WOLFRAM_CONTAINER:-wlengine}
+kernel=${WOLFRAM_KERNEL:-/usr/local/Wolfram/WolframEngine/15.0/Executables/WolframKernel}
+license_dir=${WOLFRAM_LICENSE_DIR:-$HOME/.WolframEngine}
+container_home=${WOLFRAM_CONTAINER_HOME:-/home/wolframengine}
+
+repo=$(realpath -- "$(dirname -- "$0")/..")
+binds=(-v "$license_dir:$container_home/.WolframEngine" -v "$repo:$repo")
+prev=
+for arg in "$@"; do
+  if [[ $prev == -initfile ]]; then
+    dir=$(dirname -- "$arg")
+    binds+=(-v "$(realpath -- "$dir"):$dir")
+  fi
+  prev=$arg
+done
+exec udocker run --nobanner "${binds[@]}" "$container" "$kernel" "$@"

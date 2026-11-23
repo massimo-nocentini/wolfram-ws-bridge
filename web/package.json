@@ -1,0 +1,13 @@
+{
+  "name": "wolfram-ws-bridge-client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WXF encoding/decoding in WebAssembly and a WebSocket client for the Wolfram bridge server",
+  "type": "module",
+  "exports": {
+    ".": "./wolfram-socket.js",
+    "./wxf": "./wxf.js",
+    "./wxf.wasm": "./wxf.wasm"
+  },
+  "files": ["wxf.js", "wolfram-socket.js", "wxf.wasm"]
+}
