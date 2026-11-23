@@ -31,6 +31,7 @@ needs its normal Wolfram Engine license.
 | `kernel/WSBridge.wl` | kernel side: decode, allowlist check, time/memory limits, TeX and pictures of results, request loop |
 | `kernel/allowlist.txt` | the `System`` functions clients may use |
 | `kernel/wolframkernel-udocker` | runs the kernel inside the `wlengine` udocker container |
+| `Dockerfile`, `.github/workflows/docker.yml` | server image on top of the official Wolfram Engine image, built and published to GHCR by GitHub Actions |
 | `tests/` | codec tests against the kernel, Python and Node end-to-end tests, limits test |
 
 ## Setup
@@ -60,6 +61,41 @@ replaced by a `ReplyTooLarge` failure), `--allow-origin URL`. Set `WSBRIDGE_TOKE
 token; otherwise a random one is generated at each start. Ctrl+C stops the server and its kernels.
 Each kernel's front end, which draws the pictures, starts a kernel of its own: count two license
 processes per kernel.
+
+## Docker
+
+The image `ghcr.io/massimo-nocentini/wolfram-ws-bridge` is the server with its own Wolfram
+Engine: the `Dockerfile` adds Python, the server, the kernel files and `web/` to Wolfram's
+official `wolframresearch/wolframengine:15.0` image (build argument `WOLFRAM_ENGINE_IMAGE`). The
+workflow `.github/workflows/docker.yml` builds it for every push and pull request and publishes it
+for pushes to `main` (tags `main` and `sha-<commit>`) and for tags `v<version>` (tag `<version>`).
+GHCR packages start private; the image contains the Wolfram Engine, so check Wolfram's license
+terms before making it public.
+
+The image has no license. Mount an activated `Licensing` folder over the container user's one:
+
+```sh
+docker run --rm -p 127.0.0.1:18000:18000 -e WSBRIDGE_TOKEN=change-me \
+  -v ~/.WolframEngine/Licensing:/home/wolframengine/.WolframEngine/Licensing \
+  ghcr.io/massimo-nocentini/wolfram-ws-bridge:main
+# then open http://127.0.0.1:18000/?token=change-me
+```
+
+- Arguments after the image name go to `server/bridge.py` (`--kernels`, `--time-limit`, ...). The
+  server listens on all interfaces inside the container; publish the port on `127.0.0.1` as
+  above unless a TLS proxy is in front.
+- Pages may connect only from `http://127.0.0.1:<port>` and `http://localhost:<port>`, with the
+  port the server listens on. Publishing it on another host port (`-p 8080:18000`) needs
+  `--allow-origin http://127.0.0.1:8080`.
+- A license activated on the host is tied to that machine. If the kernel in the container does
+  not accept it (the server stops at once with `kernel-1 exited with code 70` and the end of the
+  kernel's log, `No valid password found.`), activate once inside a container with the
+  folder mounted, `docker run -it --rm -v ...:/home/wolframengine/.WolframEngine/Licensing
+  --entrypoint wolframscript ghcr.io/massimo-nocentini/wolfram-ws-bridge:main -activate`, or run
+  with `--network host` on Linux.
+- `tini` is PID 1 and reaps the front-end processes of replaced kernels; `docker stop` stops
+  the server and its kernels.
+- Build it yourself with `docker build -t wolfram-ws-bridge .` (the base image is 3.3 GB).
 
 ## Use from JavaScript
 

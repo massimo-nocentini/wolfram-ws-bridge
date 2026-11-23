@@ -21,6 +21,7 @@ import os
 import pathlib
 import secrets
 import signal
+import sys
 from http import HTTPStatus
 from urllib.parse import parse_qs
 
@@ -93,11 +94,24 @@ class Kernel:
         self.proc = await asyncio.create_subprocess_exec(
             *args, stdin=asyncio.subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True)
         output.close()
+        # a kernel without a valid license exits at once: report that instead of waiting
+        received = asyncio.ensure_future(self.socket.recv())
+        exited = asyncio.ensure_future(self.proc.wait())
         try:
-            hello = await asyncio.wait_for(self.socket.recv(), timeout)
+            await asyncio.wait({received, exited}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
         except BaseException:
-            self.kill()
+            received.cancel(), exited.cancel(), self.kill()
             raise
+        exited.cancel()
+        if not received.done():
+            received.cancel()
+            self.kill()
+            log_file = self.run_dir / ("%s.log" % self.name)
+            tail = log_file.read_text(errors="replace").strip().splitlines()[-15:]
+            what = ("exited with code %s" % self.proc.returncode if self.proc.returncode is not None
+                    else "did not get ready in %g s" % timeout)
+            raise RuntimeError("%s %s; the end of %s:\n%s" % (self.name, what, log_file, "\n".join(tail)))
+        hello = received.result()
         if hello != b"ready":
             self.kill()
             raise RuntimeError("%s sent %r instead of ready" % (self.name, hello[:40]))
@@ -284,8 +298,9 @@ async def main():
                         args.request_timeout or args.time_limit + args.format_time_limit + 15, args.max_reply)
         async with serve(bridge.handler, args.host, args.port, process_request=bridge.process_request,
                          max_size=args.max_message):
+            shown = "127.0.0.1" if args.host in ("0.0.0.0", "::", "") else args.host   # all interfaces (Docker)
             log.info("ready: open http://%s:%d/?token=%s  (WebSocket endpoint /ws?token=...)",
-                     args.host, args.port, token)
+                     shown, args.port, token)
             await stop
     finally:
         pool.close()
@@ -293,4 +308,8 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except RuntimeError as exc:   # a kernel did not start
+        log.error("%s", exc)
+        sys.exit(1)
