@@ -32,7 +32,7 @@
 <body>
 <main>
   <h1>Wolfram WebSocket bridge</h1>
-  <div class="status" id="status">Loading wxf.wasm…</div>
+  <div class="status" id="status">Loading…</div>
   <form id="form">
     <textarea id="input" spellcheck="false">Integrate[x^2 Sin[x], x]</textarea>
     <button id="go" disabled>Evaluate</button>
@@ -47,7 +47,9 @@ import { WolframSocket } from './wolfram-socket.js'
 const $ = id => document.getElementById(id)
 const status = text => { $('status').textContent = text }
 
-const token = new URLSearchParams(location.search).get('token') || ''
+const params = new URLSearchParams(location.search)
+const token = params.get('token') || ''
+const module = params.get('wasm') === '64' ? 'wxf64.wasm' : 'wxf.wasm'   // ?wasm=64 selects the wasm64 build
 const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?token=${encodeURIComponent(token)}`
 
 function show(input, reply, bytes) {
@@ -66,11 +68,12 @@ function show(input, reply, bytes) {
 }
 
 try {
-  const wxf = await WXF.load(new URL('./wxf.wasm', import.meta.url))
+  status(`Loading ${module}…`)
+  const wxf = await WXF.load(new URL(`./${module}`, import.meta.url))
   status('Connecting…')
   const socket = await WolframSocket.open(url, wxf)
   socket.onclose = e => { status(`Disconnected (${e.code}).`); $('go').disabled = true }
-  status(`Connected to ${location.host}.`)
+  status(`Connected to ${location.host} (${wxf.wasm64 ? 'wasm64' : 'wasm32'}).`)
   $('go').disabled = false
   const run = async () => {
     const input = $('input').value.trim()

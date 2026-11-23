@@ -66,7 +66,8 @@ enum {
 #define wxf_is_integer(kind) ((kind) == WXF_INTEGER8 || (kind) == WXF_INTEGER16 || \
                               (kind) == WXF_INTEGER32 || (kind) == WXF_INTEGER64)
 
-/* Allocation callback: (ctx, NULL, 0, n) allocates, (ctx, p, old, n) resizes, (ctx, p, old, 0) frees. */
+/* Allocation callback: (ctx, NULL, 0, n) allocates, (ctx, p, old, n) resizes, (ctx, p, old, 0) frees.
+ * Compiling wxf.c with -DWXF_REALLOC=name calls the function name instead (same signature). */
 typedef void *(*wxf_realloc_fn)(void *ctx, void *ptr, size_t old_size, size_t new_size);
 
 typedef struct {

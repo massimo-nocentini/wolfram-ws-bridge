@@ -1,6 +1,7 @@
 // Browser test of the test page: drives headless Chromium over the DevTools protocol, evaluates
 // inputs through the page, checks the displayed results and that nothing overflows at phone width,
-// and saves screenshots (light, dark, phone) to build/screenshots/.
+// and saves screenshots (light, dark, phone) to build/screenshots/; then repeats the evaluations
+// with the wasm64 build (?wasm=64).
 //   node tests/screenshots.mjs [page URL]     (default http://127.0.0.1:18000/?token=$WSBRIDGE_TOKEN)
 // The browser is $CHROME, or chromium-headless from PATH. Needs a running server.
 import { spawn } from 'node:child_process'
@@ -74,15 +75,17 @@ try {
   await send('Page.enable')
   await send('Runtime.enable')
   await view(1100, 900, false)
-  await send('Page.navigate', { url })
-  let status = ''
-  for (let i = 0; i < 200 && !status.startsWith('Connected'); i++) {
-    await sleep(100)
-    status = (await js(`document.getElementById('status')?.textContent`)) || ''
+  const open = async (pageUrl, build) => {
+    await send('Page.navigate', { url: pageUrl })
+    let status = ''
+    for (let i = 0; i < 200 && !status.startsWith('Connected'); i++) {
+      await sleep(100)
+      status = (await js(`document.getElementById('status')?.textContent`)) || ''
+    }
+    check(status.startsWith('Connected') && status.includes(`(${build})`), `${build}: page connects to the bridge`, status)
+    if (!status.startsWith('Connected')) throw new Error('not connected')
   }
-  check(status.startsWith('Connected'), 'page connects to the bridge', status)
-  if (!status.startsWith('Connected')) throw new Error('not connected')
-
+  const evaluateCases = async build => {
   for (const [input, test] of CASES) {
     const before = await js(`document.querySelectorAll('.entry').length`)
     await js(`(() => { document.getElementById('input').value = ${JSON.stringify(input)}; document.getElementById('go').click() })()`)
@@ -92,8 +95,12 @@ try {
       return { input: text('.in'), out: text('.out:not(.err)'), error: text('.err'),
                messages: [...e.querySelectorAll('.msg')].map(m => m.textContent) }
     })()`)
-    check(entry.input === input && test(entry), input, JSON.stringify(entry))
+    check(entry.input === input && test(entry), `${build}: ${input}`, JSON.stringify(entry))
   }
+  }
+
+  await open(url, 'wasm32')
+  await evaluateCases('wasm32')
 
   await shot('light')
   await view(1100, 900, true)
@@ -104,6 +111,10 @@ try {
   const width = await js(`[document.documentElement.scrollWidth, document.documentElement.clientWidth]`)
   check(width[0] <= width[1], 'no horizontal scrolling at 390 px', `page is ${width[0]} px wide in a ${width[1]} px viewport`)
   await shot('phone')
+
+  await view(1100, 900, false)
+  await open(url + (url.includes('?') ? '&' : '?') + 'wasm=64', 'wasm64')
+  await evaluateCases('wasm64')
   ws.close()
   console.log(`screenshots in ${outDir}`)
 } catch (err) {

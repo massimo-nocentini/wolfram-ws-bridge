@@ -1,4 +1,5 @@
-// End-to-end test of web/wxf.js + web/wxf.wasm + web/wolfram-socket.js against a running bridge.
+// End-to-end test of web/wxf.js + web/wolfram-socket.js against a running bridge, run once with
+// web/wxf.wasm (wasm32) and once with web/wxf64.wasm (wasm64).
 //   node tests/node_e2e.mjs [ws://127.0.0.1:18000/ws?token=...]   (token defaults to $WSBRIDGE_TOKEN)
 import { readFile } from 'node:fs/promises'
 import { isDeepStrictEqual } from 'node:util'
@@ -6,14 +7,12 @@ import { WXF, WArray, WAssociation, WBigReal, fn, real, sym, toInputForm } from 
 import { WolframSocket } from '../web/wolfram-socket.js'
 
 const url = process.argv[2] || `ws://127.0.0.1:18000/ws?token=${process.env.WSBRIDGE_TOKEN || 'testtoken'}`
-const wxf = await WXF.load(await readFile(new URL('../web/wxf.wasm', import.meta.url)))
-let failed = 0
+let failed = 0, prefix = ''
 const check = (ok, label, detail = '') => {
   if (!ok) failed++
-  console.log(ok ? 'ok  ' : 'FAIL', label, detail)
+  console.log(ok ? 'ok  ' : 'FAIL', prefix + label, detail)
 }
 
-// 1. local round trips through the wasm codec
 const values = [
   0, -1, 127, 128, -129, 40000, 2 ** 31, -(2 ** 53), 2n ** 63n - 1n, -(2n ** 63n), 10n ** 40n, -(10n ** 40n),
   real(0.1), real(-2.5e300), real(3), new WBigReal('3.14159265358979323846264338327950288`35.'),
@@ -25,6 +24,13 @@ const values = [
   new WArray(true, 'UnsignedInteger8', [3], new Uint8Array([1, 2, 250])),
   new WArray(false, 'ComplexReal64', [2], new Float64Array([1, 2, 3, -4])),
 ]
+
+async function suite(file) {
+prefix = file.replace('.wasm', '') + ': '
+const wxf = await WXF.load(await readFile(new URL(`../web/${file}`, import.meta.url)))
+check(wxf.wasm64 === file.includes('64'), `module is ${wxf.wasm64 ? 'wasm64' : 'wasm32'}`)
+
+// 1. local round trips through the wasm codec
 for (const v of values) {
   const back = wxf.decode(wxf.encode(v))
   check(isDeepStrictEqual(back, v), `local round trip ${toInputForm(v).slice(0, 60)}`)
@@ -34,6 +40,9 @@ for (const [bytes, label] of [[[0x38, 0x3a, 0x66, 5], 'truncated'], [[0x38, 0x43
   try { wxf.decode(new Uint8Array(bytes)) } catch { threw = true }
   check(threw, `rejects ${label} input`)
 }
+// a large value makes the memory grow well past its initial size
+const big = new Uint8Array(96 * 1024 * 1024).map((_, i) => i * 7)
+check(isDeepStrictEqual(wxf.decode(wxf.encode(big)), big), 'local round trip of a 96 MiB ByteArray')
 
 // 2. the same values sent to the kernel inside Hold[...] must come back unchanged
 const socket = await WolframSocket.open(url, wxf)
@@ -65,6 +74,14 @@ await expect('Integrate[', r => !r.success && r.failure === 'Syntax')
 const many = await Promise.all([1, 2, 3, 4, 5].map(n => socket.evaluate(`${n}^${n}`)))
 check(isDeepStrictEqual(many.map(r => r.result), [1, 4, 27, 256, 3125]), 'pipelined requests answered in order')
 socket.close()
+return values.map(v => wxf.encode(v))
+}
+
+const bytes32 = await suite('wxf.wasm')
+const bytes64 = await suite('wxf64.wasm')
+prefix = ''
+check(isDeepStrictEqual(bytes32, bytes64), 'wasm32 and wasm64 encode every value to the same bytes')
+const wxf = await WXF.load(await readFile(new URL('../web/wxf.wasm', import.meta.url)))
 
 // 4. a wrong token is refused
 let refused = false

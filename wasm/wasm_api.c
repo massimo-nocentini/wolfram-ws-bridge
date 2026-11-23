@@ -1,4 +1,4 @@
-/* wasm32 exports for wxf.c, used by web/wxf.js.
+/* wasm32 and wasm64 exports for wxf.c, used by web/wxf.js.
  *
  * Memory is a bump arena above __heap_base: wxf_reset() frees everything at once, so each
  * encode or decode starts with a reset. One writer and one reader exist at a time; JavaScript
@@ -34,8 +34,9 @@ static void *arena_alloc(size_t n) {
     return (void *)p;
 }
 
-/* realloc callback for the writer: grows in place when the block is the newest one */
-static void *arena_realloc(void *ctx, void *ptr, size_t old, size_t n) {
+/* realloc callback for the writer: grows in place when the block is the newest one.
+ * wxf.c is compiled with -DWXF_REALLOC=wxf_arena_realloc and calls it directly. */
+void *wxf_arena_realloc(void *ctx, void *ptr, size_t old, size_t n) {
     (void)ctx;
     if (!n) return 0; /* freed by the next reset */
     if (ptr && (uintptr_t)ptr + old == heap_top) {
@@ -50,6 +51,9 @@ static void *arena_realloc(void *ctx, void *ptr, size_t old, size_t n) {
     }
     return p;
 }
+
+/* 4 for wasm32, 8 for wasm64: on wasm64 pointer and size arguments and results are i64 (BigInt) */
+EXPORT(wxf_pointer_size) int pointer_size(void) { return (int)sizeof(void *); }
 
 EXPORT(wxf_reset) void wasm_reset(void) {
     heap_top = heap_start();
@@ -74,7 +78,7 @@ EXPORT(wxf_scratch) uint8_t *wasm_scratch(size_t n) {
 }
 
 /* ---- writer ---- */
-EXPORT(wxf_w_begin) int w_begin(void) { return wxf_writer_init(&writer, arena_realloc, 0); }
+EXPORT(wxf_w_begin) int w_begin(void) { return wxf_writer_init(&writer, 0, 0); /* allocation goes through WXF_REALLOC */ }
 EXPORT(wxf_w_function) int w_function(uint32_t argc) { return wxf_put_function(&writer, argc); }
 EXPORT(wxf_w_symbol) int w_symbol(const char *s, size_t n) { return wxf_put_symbol(&writer, s, n); }
 EXPORT(wxf_w_string) int w_string(const char *s, size_t n) { return wxf_put_string(&writer, s, n); }

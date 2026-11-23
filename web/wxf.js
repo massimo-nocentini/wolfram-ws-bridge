@@ -1,4 +1,5 @@
-// Wolfram expressions <-> WXF bytes, using wxf.wasm. Works in browsers and in Node (ES module).
+// Wolfram expressions <-> WXF bytes, using wxf.wasm (wasm32) or wxf64.wasm (wasm64, memory64).
+// Works in browsers and in Node (ES module).
 //
 // JavaScript form of expressions:
 //   integers           number (or BigInt beyond 2^53)       reals         WReal (or a non-integer number when encoding)
@@ -83,8 +84,39 @@ export class WXFError extends Error {
 const INT64_MIN = -(2n ** 63n), INT64_MAX = 2n ** 63n - 1n
 const K = { f: 0x66, s: 0x73, S: 0x53, B: 0x42, C: 0x43, j: 0x6a, i: 0x69, L: 0x4c, r: 0x72, I: 0x49, R: 0x52, A: 0x41, rule: 0x2d, delayed: 0x3a, packed: 0xc1, numeric: 0xc2 }
 
+// Exports whose arguments or results are pointers or sizes: i32 on wasm32, i64 (BigInt) on wasm64.
+// [positions of such arguments, whether the result is one]
+const SIZE_SIGNATURES = {
+  wxf_alloc: [[0], true], wxf_scratch: [[0], true],
+  wxf_w_symbol: [[0, 1]], wxf_w_string: [[0, 1]], wxf_w_binary: [[0, 1]], wxf_w_big_integer: [[0, 1]],
+  wxf_w_big_real: [[0, 1]], wxf_w_array: [[2, 3, 4]], wxf_w_data: [[], true], wxf_w_length: [[], true],
+  wxf_r_begin: [[0, 1]], wxf_r_bytes: [[], true], wxf_r_size: [[], true], wxf_r_rank: [[], true], wxf_r_dim: [[0]],
+}
+
+/** The module's exports with every pointer and size as a plain number, for both wasm32 and wasm64. */
+function adapt(exports) {
+  const wasm64 = exports.wxf_pointer_size() === 8
+  const out = { memory: exports.memory, wasm64 }
+  for (const [name, f] of Object.entries(exports)) {
+    if (typeof f !== 'function') continue
+    const signature = SIZE_SIGNATURES[name]
+    if (!signature) { out[name] = f; continue }
+    const [positions, sizeResult] = signature
+    out[name] = (...args) => {
+      if (wasm64) for (const i of positions) args[i] = BigInt(args[i])
+      const result = f(...args)
+      // wasm32 returns i32 as a signed number: >>> 0 keeps addresses above 2 GiB positive
+      return sizeResult ? (wasm64 ? Number(result) : result >>> 0) : result
+    }
+  }
+  return out
+}
+
 export class WXF {
-  /** source: URL of wxf.wasm, a fetch Response, or the module bytes */
+  /**
+   * source: URL of wxf.wasm (the default) or wxf64.wasm, a fetch Response, or the module bytes.
+   * wxf64.wasm needs memory64 support (Chrome/Edge 133+, Firefox 134+, Node 24+).
+   */
   static async load(source = new URL('./wxf.wasm', import.meta.url)) {
     let bytes
     if (source instanceof ArrayBuffer || ArrayBuffer.isView(source)) bytes = source
@@ -98,7 +130,9 @@ export class WXF {
   }
 
   constructor(exports) {
-    this.x = exports
+    this.x = adapt(exports)
+    /** true when the loaded module is wasm64 */
+    this.wasm64 = this.x.wasm64
     this.encoder = new TextEncoder()
     this.decoder = new TextDecoder('utf-8')
   }

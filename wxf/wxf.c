@@ -1,6 +1,16 @@
 /* WXF encoder and decoder; see wxf.h. No libc: memory comes from the caller's callback. */
 #include "wxf.h"
 
+/* Builds may fix the allocation function at compile time with -DWXF_REALLOC=name, making the
+ * call direct. The wasm builds do: they then need no function table (clang 18's wasm64 indirect
+ * calls do not match the table64 that newer linkers emit). */
+#ifdef WXF_REALLOC
+void *WXF_REALLOC(void *ctx, void *ptr, size_t old_size, size_t new_size);
+#define CALL_REALLOC(w, p, old, n) WXF_REALLOC((w)->ctx, (p), (old), (n))
+#else
+#define CALL_REALLOC(w, p, old, n) (w)->realloc_fn((w)->ctx, (p), (old), (n))
+#endif
+
 static void copy_bytes(uint8_t *dst, const uint8_t *src, size_t n) {
     while (n--) *dst++ = *src++;
 }
@@ -34,7 +44,7 @@ static int reserve(wxf_writer *w, size_t extra) {
         if (cap > SIZE_MAX / 2) { cap = need; break; }
         cap *= 2;
     }
-    uint8_t *p = w->realloc_fn(w->ctx, w->data, w->capacity, cap);
+    uint8_t *p = CALL_REALLOC(w, w->data, w->capacity, cap);
     if (!p) return w->error = WXF_ERR_NOMEM;
     w->data = p;
     w->capacity = cap;
@@ -85,7 +95,7 @@ int wxf_writer_init(wxf_writer *w, wxf_realloc_fn realloc_fn, void *ctx) {
 }
 
 void wxf_writer_free(wxf_writer *w) {
-    if (w->data) w->realloc_fn(w->ctx, w->data, w->capacity, 0);
+    if (w->data) CALL_REALLOC(w, w->data, w->capacity, 0);
     w->data = 0;
     w->length = w->capacity = 0;
 }

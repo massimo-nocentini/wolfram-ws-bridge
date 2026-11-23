@@ -5,7 +5,7 @@ binary expression format) over a **WebSocket**, encoded and decoded by a small C
 to WebAssembly.
 
 ```
-browser: your JS ── wolfram-socket.js ── wxf.js ── wxf.wasm (C codec)
+browser: your JS ── wolfram-socket.js ── wxf.js ── wxf.wasm or wxf64.wasm (C codec)
             │  binary WebSocket messages, one WXF expression each
 server:  server/bridge.py (Python, websockets + pyzmq)
             │  local ZMQ socket per kernel
@@ -21,8 +21,8 @@ needs its normal Wolfram Engine license.
 | Path | What it is |
 |---|---|
 | `wxf/wxf.h`, `wxf/wxf.c` | WXF encoder/decoder in C, no libc, no allocation of its own (WSTP-like put calls; token reader) |
-| `wasm/wasm_api.c` | wasm32 exports and a bump arena for the codec |
-| `web/wxf.wasm` | the built module (9 KB, no imports); rebuild with `make` |
+| `wasm/wasm_api.c` | wasm32/wasm64 exports and a bump arena for the codec |
+| `web/wxf.wasm`, `web/wxf64.wasm` | the built modules, wasm32 and wasm64 (7 KB each, no imports); rebuild with `make` |
 | `web/wxf.js` | JS expressions ⇄ WXF bytes through the wasm module; `toInputForm` for display |
 | `web/wolfram-socket.js` | WebSocket client: `evaluate(expr or string)` → Promise of the reply |
 | `web/index.html` | test page served by the bridge |
@@ -36,7 +36,8 @@ needs its normal Wolfram Engine license.
 
 ```sh
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt   # or requirements.txt without tests
-make            # only needed after changing the C code: clang + wasm-ld (or rustup's rust-lld)
+make            # only needed after changing the C code: clang + wasm-ld (or rustup's rust-lld);
+                # builds web/wxf.wasm (wasm32) and web/wxf64.wasm (wasm64)
 ```
 
 The kernel wrapper binds `~/.WolframEngine` (license) into the container. Settings through the
@@ -68,6 +69,18 @@ const b = await socket.evaluate(fn('Factor', fn('Plus', fn('Power', x, 4), -1)))
 // a.messages (["Power::infy: Infinite expression 0^(-1) encountered."]), a.timing
 // failures: { success: false, failure: "NotAllowed" | "Syntax" | "TimeLimit" | ..., message, symbols }
 ```
+
+### wasm32 or wasm64
+
+`WXF.load()` loads `wxf.wasm` (wasm32), which runs everywhere and is limited to 4 GiB of memory.
+For the wasm64 build, which needs memory64 support (Chrome/Edge 133+, Firefox 134+, Node 24+):
+
+```js
+const wxf = await WXF.load(new URL('./wxf64.wasm', import.meta.url))   // wxf.wasm64 === true
+```
+
+The JavaScript API is the same for both. On wasm64 the module's pointers and sizes are 64-bit
+(`BigInt` at the JS boundary); `wxf.js` converts them. The test page takes `?wasm=64`.
 
 Expression mapping (see the top of `web/wxf.js`): integers ⇄ `number`/`BigInt`, reals ⇄ `WReal`
 (non-integer numbers also encode as reals), strings ⇄ `string`, `List` ⇄ `Array`, symbols ⇄
@@ -108,10 +121,12 @@ Evaluating expressions from the network is running code on this machine, so:
 tests/run_codec_tests.sh       # kernel writes 62 reference WXF files: decode+re-encode must give
                                # identical bytes; kernel reads files written by the codec (ASan/UBSan)
 # with a server running (WSBRIDGE_TOKEN=testtoken):
-node tests/node_e2e.mjs        # 83 checks: wasm codec round trips, kernel round trips, refusals, ordering
+node tests/node_e2e.mjs        # 170 checks, with wasm32 and wasm64: codec and kernel round trips, a 96 MiB
+                               # value, refusals, ordering; both builds must encode to the same bytes
 .venv/bin/python tests/smoke_ws.py
 node tests/screenshots.mjs     # the test page in headless Chromium ($CHROME or chromium-headless):
-                               # 7 evaluations, no overflow at phone width; screenshots in build/screenshots/
+                               # 7 evaluations with each build, no overflow at phone width;
+                               # screenshots in build/screenshots/
 # with a server started with --time-limit 1 --memory-limit 200000000:
 .venv/bin/python tests/limits_test.py
 ```
