@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Wolfram WebSocket bridge</title>
+<link rel="stylesheet" href="vendor/katex/katex.min.css">
+<script defer src="vendor/katex/katex.min.js"></script>
 <style>
   :root { --bg: #fbfbfa; --fg: #1d1d1b; --muted: #6b6b66; --line: #deded8; --accent: #b3261e; --ok: #1f6f43; --code: #f1f1ed; }
   @media (prefers-color-scheme: dark) {
@@ -15,56 +17,118 @@
   h1 { font-size: 20px; margin: 0 0 4px; }
   .status { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
   form { display: flex; gap: 8px; }
-  textarea { flex: 1; min-height: 64px; padding: 8px; font: 14px/1.4 ui-monospace, monospace; background: var(--code);
+  textarea { flex: 1; min-width: 0; min-height: 64px; padding: 8px; font: 14px/1.4 ui-monospace, monospace; background: var(--code);
              color: var(--fg); border: 1px solid var(--line); border-radius: 6px; resize: vertical; }
   button { padding: 0 18px; font: inherit; border: 1px solid var(--line); border-radius: 6px; background: var(--fg); color: var(--bg); cursor: pointer; }
   button:disabled { opacity: .5; cursor: default; }
-  .hint { color: var(--muted); font-size: 13px; margin: 6px 0 20px; }
+  .hint { color: var(--muted); font-size: 13px; margin: 6px 0 8px; }
+  .examples { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 20px; }
+  .examples button { padding: 2px 8px; font: 12px/1.5 ui-monospace, monospace; background: var(--code); color: var(--fg); max-width: 100%;
+                     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .entry { border-top: 1px solid var(--line); padding: 12px 0; }
-  .in, .out { font: 14px/1.4 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .in, .out, .code { font: 14px/1.4 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
   .in { color: var(--muted); }
   .out { margin-top: 4px; }
+  /* typeset result: a long formula scrolls inside its entry instead of widening the page */
+  .math { margin-top: 2px; overflow-x: auto; overflow-y: hidden; }
+  .math .katex-display { margin: 4px 0; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+  .math .katex-display.fleqn > .katex { padding-left: 0; }
+  .code { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  /* pictures sit on white, so that black axes and labels stay readable on a dark page */
+  .picture { display: inline-block; max-width: 100%; margin-top: 6px; padding: 8px; background: #fff; border: 1px solid var(--line); border-radius: 6px; }
+  .picture img { display: block; max-width: 100%; height: auto; }
+  .picture img.pixels { image-rendering: pixelated; }
   .err { color: var(--accent); }
-  .msg { color: var(--accent); font-size: 13px; }
+  .msg { color: var(--accent); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .meta { color: var(--muted); font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
 <main>
   <h1>Wolfram WebSocket bridge</h1>
-  <div class="status" id="status">Loading…</div>
+  <div class="status" id="status" role="status">Loading…</div>
   <form id="form">
-    <textarea id="input" spellcheck="false">Integrate[x^2 Sin[x], x]</textarea>
+    <textarea id="input" spellcheck="false" aria-label="Wolfram Language input">Integrate[x^2 Sin[x], x]</textarea>
     <button id="go" disabled>Evaluate</button>
   </form>
-  <div class="hint">Ctrl+Enter evaluates. Input is sent as WXF; only the server's allowlisted math functions can run.</div>
-  <div id="log"></div>
+  <div class="hint">Ctrl+Enter evaluates. Input is sent as WXF; only the server's allowlisted math and plotting functions can run.</div>
+  <div class="examples" id="examples"></div>
+  <div id="log" aria-live="polite"></div>
 </main>
 <script type="module">
 import { WXF, toInputForm } from './wxf.js'
-import { WolframSocket } from './wolfram-socket.js'
+import { WolframSocket, imageURL } from './wolfram-socket.js'
 
 const $ = id => document.getElementById(id)
 const status = text => { $('status').textContent = text }
+const MAX_ENTRIES = 100   // older entries are removed, and the URLs of their pictures released
 
 const params = new URLSearchParams(location.search)
 const token = params.get('token') || ''
 const module = params.get('wasm') === '64' ? 'wxf64.wasm' : 'wxf.wasm'   // ?wasm=64 selects the wasm64 build
 const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?token=${encodeURIComponent(token)}`
 
-function show(input, reply, bytes) {
+for (const example of ['Solve[x^3 - 6 x^2 + 11 x - 6 == 0, x]', 'Series[Tan[x], {x, 0, 9}]', 'Inverse[{{a, b}, {c, d}}]',
+  'Plot[{Sin[x], Cos[x]}, {x, 0, 2 Pi}]', 'Plot3D[Sin[x y], {x, 0, 3}, {y, 0, 3}]', 'N[Pi, 50]']) {
+  const b = document.createElement('button')
+  b.type = 'button'
+  b.textContent = example
+  b.onclick = () => { $('input').value = example; $('input').focus() }
+  $('examples').append(b)
+}
+
+// Server strings reach the page only as text, through KaTeX's rendering of TeX, or as an <img>.
+// KaTeX's limits are given explicitly: no \href or \url (trust), no huge \rule or \kern (maxSize,
+// in em), bounded macro expansion; \arraystretch spaces the rows of matrices of fractions.
+const KATEX = { displayMode: true, fleqn: true, throwOnError: false, strict: 'ignore', trust: false, maxSize: 50, maxExpand: 1000 }
+
+function show(input, reply, bytes, ms) {
   const entry = document.createElement('div')
   entry.className = 'entry'
-  const add = (cls, text) => { const d = document.createElement('div'); d.className = cls; d.textContent = text; entry.append(d) }
+  const add = (cls, text) => { const d = document.createElement('div'); d.className = cls; d.textContent = text; entry.append(d); return d }
   add('in', input)
   if (reply.success) {
-    add('out', reply.inputForm)
+    let detail
+    if (reply.image) {
+      const card = document.createElement('div')
+      card.className = 'picture'
+      const img = document.createElement('img')
+      img.alt = `Picture: ${input}`
+      img.src = entry.dataset.url = imageURL(reply.image)
+      // a raster image of a few pixels is enlarged, with visible pixels; the handler keeps only
+      // what it needs, not the whole reply
+      const isPNG = reply.image.format === 'PNG'
+      img.onload = () => {
+        if (isPNG && img.naturalWidth < 160) {
+          img.classList.add('pixels')
+          img.style.width = `${img.naturalWidth * Math.ceil(160 / img.naturalWidth)}px`
+        }
+        img.onload = null
+      }
+      card.append(img)
+      entry.append(card)
+      detail = `${reply.image.format} picture, ${(reply.image.data.length / 1024).toFixed(1)} KB`
+    } else {
+      if (reply.tex !== undefined && window.katex) {
+        const math = add('math', '')
+        katex.render(reply.tex, math, { ...KATEX, macros: { '\\arraystretch': '1.5' } })
+        add('code', reply.inputForm)   // the InputForm stays there to copy
+      } else {
+        add('out', reply.inputForm)
+      }
+      detail = reply.result === undefined ? 'result too large to send' : `decoded: ${toInputForm(reply.result).slice(0, 300)}`
+    }
+    if (reply.format) detail += ` · no picture or TeX (${reply.format})`
     for (const m of reply.messages) add('msg', m)
-    add('meta', `${bytes} bytes sent · ${reply.timing.toFixed(4)} s · decoded: ${toInputForm(reply.result).slice(0, 300)}`)
+    add('meta', `${bytes} bytes sent · ${reply.timing.toFixed(4)} s in the kernel · ${ms} ms round trip · ${detail}`)
   } else {
     add('out err', `${reply.failure}: ${reply.message}${reply.symbols.length ? ' ' + reply.symbols.join(', ') : ''}`)
   }
   $('log').prepend(entry)
+  for (const old of [...$('log').children].slice(MAX_ENTRIES)) {
+    if (old.dataset.url) URL.revokeObjectURL(old.dataset.url)
+    old.remove()
+  }
 }
 
 try {
@@ -79,10 +143,12 @@ try {
     const input = $('input').value.trim()
     if (!input) return
     $('go').disabled = true
+    const start = performance.now()
     try {
-      show(input, await socket.evaluate(input), wxf.encode(input).length)
+      const reply = await socket.evaluate(input)
+      show(input, reply, wxf.encode(input).length, Math.round(performance.now() - start))
     } catch (err) {
-      show(input, { success: false, failure: 'Error', message: err.message, symbols: [] }, 0)
+      show(input, { success: false, failure: 'Error', message: err.message, symbols: [] }, 0, 0)
     } finally {
       $('go').disabled = socket.ws.readyState !== WebSocket.OPEN
     }

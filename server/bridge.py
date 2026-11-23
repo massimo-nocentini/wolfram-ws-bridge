@@ -2,12 +2,13 @@
 
 Each binary message is one WXF-encoded expression; a text message is taken as Wolfram Language
 input. Every request gets exactly one binary reply: the WXF of an Association with "Success"
-and either "Result"/"InputForm"/"Messages"/"Timing" or "Failure"/"Message". Replies on one
+and either "Result"/"InputForm"/"Messages"/"Timing" (plus "TeX" or "Image" for showing the
+result) or "Failure"/"Message". Replies on one
 connection come in request order. The same port serves the files in web/ over plain HTTP.
 
 Kernels run kernel/WSBridge.wl's Serve loop and talk to this process over a local ZMQ PAIR
 socket each. A kernel that does not answer in time is killed with its whole process group
-and replaced.
+and replaced. A kernel that sends "restart" before a reply exits after it and is replaced too.
 """
 
 import argparse
@@ -77,6 +78,7 @@ class Kernel:
         self.name = "kernel-%d" % Kernel.count
         self.command, self.initfiles, self.run_dir = command, initfiles, run_dir
         self.proc = self.socket = None
+        self.exiting = False
 
     async def start(self, timeout):
         self.socket = zmq.asyncio.Context.instance().socket(zmq.PAIR)
@@ -104,7 +106,18 @@ class Kernel:
 
     async def evaluate(self, request, timeout):
         await self.socket.send(request)
-        return await asyncio.wait_for(self.socket.recv(), timeout)
+        reply = await asyncio.wait_for(self.socket.recv(), timeout)
+        if reply == b"restart":   # this kernel can no longer make pictures and exits after the reply
+            self.exiting = True
+            reply = await asyncio.wait_for(self.socket.recv(), timeout)
+        return reply
+
+    async def exited(self, timeout):
+        """Waits for a kernel that exits by itself, so that its license is free again, then
+        kills whatever is left of it."""
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(self.proc.wait(), timeout)
+        self.kill()
 
     def kill(self):
         if self.proc and self.proc.returncode is None:
@@ -137,7 +150,10 @@ class KernelPool:
             self.idle.put_nowait(kernel)
 
     async def _replace(self, kernel):
-        kernel.kill()
+        if kernel.exiting:
+            await kernel.exited(15)
+        else:
+            kernel.kill()
         self.kernels.discard(kernel)
         while True:
             try:
@@ -157,7 +173,11 @@ class KernelPool:
             if isinstance(exc, asyncio.CancelledError):
                 raise
             return wxf_failure("KernelRestarted", "The kernel did not answer in time and was restarted.")
-        self.idle.put_nowait(kernel)
+        if kernel.exiting:
+            log.info("%s asked to be replaced", kernel.name)
+            asyncio.ensure_future(self._replace(kernel))
+        else:
+            self.idle.put_nowait(kernel)
         return reply
 
     def close(self):
@@ -169,8 +189,9 @@ class KernelPool:
 # ---- WebSocket and HTTP ----
 
 class Bridge:
-    def __init__(self, pool, token, origins, request_timeout):
+    def __init__(self, pool, token, origins, request_timeout, max_reply):
         self.pool, self.token, self.origins, self.request_timeout = pool, token, origins, request_timeout
+        self.max_reply = max_reply
 
     def process_request(self, connection, request):
         path, _, query = request.path.partition("?")
@@ -205,7 +226,12 @@ class Bridge:
             request = wxf_string(request)
         if not request.startswith(b"8:"):
             return wxf_failure("Decode", "Only uncompressed WXF (header 8:) is accepted.")
-        return await self.pool.evaluate(request, self.request_timeout)
+        reply = await self.pool.evaluate(request, self.request_timeout)
+        if len(reply) > self.max_reply:
+            log.warning("reply of %d bytes not sent (--max-reply %d)", len(reply), self.max_reply)
+            return wxf_failure("ReplyTooLarge", "The reply has %d bytes, more than the server's limit of %d."
+                               % (len(reply), self.max_reply))
+        return reply
 
     async def handler(self, ws):
         log.info("connection from %s", ws.remote_address)
@@ -222,9 +248,13 @@ async def main():
                    help="kernel executable (default: the udocker wrapper)")
     p.add_argument("--time-limit", type=float, default=30, help="seconds per evaluation")
     p.add_argument("--memory-limit", type=int, default=2 * 1024**3, help="bytes per evaluation")
+    p.add_argument("--format-time-limit", type=float, default=20,
+                   help="seconds for the TeX or picture of a result, after the evaluation (default 20)")
     p.add_argument("--request-timeout", type=float,
-                   help="seconds to wait for a kernel before replacing it (default: time limit + 15)")
+                   help="seconds to wait for a kernel before replacing it (default: time limit + format time limit + 15)")
     p.add_argument("--max-message", type=int, default=8 * 1024**2, help="largest request in bytes")
+    p.add_argument("--max-reply", type=int, default=64 * 1024**2,
+                   help="largest reply in bytes; a larger one is replaced by a ReplyTooLarge failure")
     p.add_argument("--allow-origin", action="append", default=[], help="extra allowed page origin")
     args = p.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
@@ -237,7 +267,8 @@ async def main():
     run_dir.mkdir(exist_ok=True)
     config = run_dir / "config.wl"
     config.write_text(
-        f"WSBridge`$TimeLimit = {args.time_limit!r};\nWSBridge`$MemoryLimit = {args.memory_limit};\n")
+        f"WSBridge`$TimeLimit = {args.time_limit!r};\nWSBridge`$MemoryLimit = {args.memory_limit};\n"
+        f"WSBridge`$FormatTimeLimit = {args.format_time_limit!r};\n")
     initfiles = [str(ROOT / "kernel" / "WSBridge.wl"), str(config)]
 
     pool = KernelPool(args.kernels, args.kernel, initfiles, run_dir)
@@ -247,8 +278,10 @@ async def main():
     try:
         log.info("starting %d kernel(s) with %s", args.kernels, args.kernel)
         await pool.start()
-        # a healthy kernel answers within its own time limit; the extra 15 s cover serialization
-        bridge = Bridge(pool, token, origins, args.request_timeout or args.time_limit + 15)
+        # a healthy kernel answers within its time limits for the evaluation and for the TeX or
+        # picture of the result; the extra 15 s cover serialization
+        bridge = Bridge(pool, token, origins,
+                        args.request_timeout or args.time_limit + args.format_time_limit + 15, args.max_reply)
         async with serve(bridge.handler, args.host, args.port, process_request=bridge.process_request,
                          max_size=args.max_message):
             log.info("ready: open http://%s:%d/?token=%s  (WebSocket endpoint /ws?token=...)",

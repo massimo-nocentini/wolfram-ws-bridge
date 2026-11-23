@@ -1,6 +1,7 @@
 // Browser test of the test page: drives headless Chromium over the DevTools protocol, evaluates
-// inputs through the page, checks the displayed results and that nothing overflows at phone width,
-// and saves screenshots (light, dark, phone) to build/screenshots/; then repeats the evaluations
+// inputs through the page, checks the displayed results (math typeset with KaTeX, plots as loaded
+// pictures) and that nothing overflows at phone width,
+// and saves screenshots (light, light-full, dark, phone) to build/screenshots/; then repeats the evaluations
 // with the wasm64 build (?wasm=64).
 //   node tests/screenshots.mjs [page URL]     (default http://127.0.0.1:18000/?token=$WSBRIDGE_TOKEN)
 // The browser is $CHROME, or chromium-headless from PATH. Needs a running server.
@@ -13,15 +14,24 @@ const url = process.argv[2] || `http://127.0.0.1:18000/?token=${process.env.WSBR
 const outDir = new URL('../build/screenshots/', import.meta.url).pathname
 const chrome = process.env.CHROME || 'chromium-headless'
 
-// input, then a check of the newest entry's texts: { out, messages, error }
+// input, then a check of the newest entry: { out (the InputForm text), katex (typeset math shown),
+// img (natural width of the picture, 0 if none or not loaded), messages, error }
+const math = (text, more = () => true) => e => e.katex && e.out === text && !e.img && more(e)
+const picture = () => e => e.img > 0 && e.out === '' && e.alt === `Picture: ${e.input}` && !e.katex
 const CASES = [
-  ['Run["rm -rf ~"]', e => e.error.startsWith('NotAllowed') && e.error.includes('System`Run')],
-  ['Series[Exp[x] Sin[x], {x, 0, 6}]', e => e.out === 'SeriesData[x, 0, {1, 1, 1/3, 0, -1/30, -1/90}, 1, 7, 1]'],
-  ['1/0', e => e.out === 'ComplexInfinity' && e.messages.length === 1 && e.messages[0].startsWith('Power::infy')],
-  ['N[Pi, 50]', e => e.out.startsWith('3.14159265358979323846264338327950288419716939937510')],
-  ['Solve[x^3 - 6 x^2 + 11 x - 6 == 0, x]', e => e.out === '{{x -> 1}, {x -> 2}, {x -> 3}}'],
-  ["DSolve[y''[t] + y[t] == 0, y[t], t]", e => e.out === '{{y[t] -> C[1]*Cos[t] + C[2]*Sin[t]}}'],
-  ['Integrate[x^2 Sin[x], x]', e => e.out === '-((-2 + x^2)*Cos[x]) + 2*x*Sin[x]'],
+  ['Run["rm -rf ~"]', e => e.error.startsWith('NotAllowed') && e.error.includes('System`Run') && !e.katex],
+  ['Series[Exp[x] Sin[x], {x, 0, 6}]', math('SeriesData[x, 0, {1, 1, 1/3, 0, -1/30, -1/90}, 1, 7, 1]')],
+  ['1/0', math('ComplexInfinity', e => e.messages.length === 1 && e.messages[0].startsWith('Power::infy'))],
+  // a message with a 200-digit number must wrap, not widen the page (checked at 390 px below)
+  ['0^(-10^200)', math('ComplexInfinity', e => e.messages.length === 1 && e.messages[0].length > 200)],
+  ['N[Pi, 50]', e => e.katex && e.out.startsWith('3.14159265358979323846264338327950288419716939937510')],
+  ['Solve[x^3 - 6 x^2 + 11 x - 6 == 0, x]', math('{{x -> 1}, {x -> 2}, {x -> 3}}')],
+  ["DSolve[y''[t] + y[t] == 0, y[t], t]", math('{{y[t] -> C[1]*Cos[t] + C[2]*Sin[t]}}')],
+  ['Expand[(x + y)^25]', e => e.katex && e.out.startsWith('x^25 + 25*x^24*y')],   // wider than a phone
+  ['Integrate[x^2 Sin[x], x]', math('-((-2 + x^2)*Cos[x]) + 2*x*Sin[x]')],
+  ['ContourPlot[Sin[x y], {x, 0, 3}, {y, 0, 3}]', picture()],   // a PNG inside an SVG
+  ['Plot[Sin[x], {x, 0, 6}]', picture()],
+  ['Plot3D[Sin[x y], {x, 0, 3}, {y, 0, 3}]', picture()],
 ]
 
 let failed = 0
@@ -66,8 +76,11 @@ try {
     await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: dark ? 'dark' : 'light' }] })
     await sleep(300)
   }
-  const shot = async name => {
-    const r = await send('Page.captureScreenshot', { format: 'png' })
+  const shot = async (name, fullPage = false) => {
+    const size = fullPage && (await send('Page.getLayoutMetrics')).result.cssContentSize
+    const r = await send('Page.captureScreenshot', fullPage
+      ? { format: 'png', captureBeyondViewport: true, clip: { x: 0, y: 0, width: size.width, height: size.height, scale: 1 } }
+      : { format: 'png' })
     await writeFile(join(outDir, `${name}.png`), Buffer.from(r.result.data, 'base64'))
   }
 
@@ -90,9 +103,13 @@ try {
     const before = await js(`document.querySelectorAll('.entry').length`)
     await js(`(() => { document.getElementById('input').value = ${JSON.stringify(input)}; document.getElementById('go').click() })()`)
     for (let i = 0; i < 600 && (await js(`document.querySelectorAll('.entry').length`)) === before; i++) await sleep(50)
+    // a picture loads asynchronously from its object URL
+    for (let i = 0; i < 100 && (await js(`(() => { const i = document.querySelector('.entry img'); return !!i && !i.complete })()`)); i++) await sleep(50)
     const entry = await js(`(() => {
       const e = document.querySelector('.entry'), text = s => e.querySelector(s)?.textContent || ''
-      return { input: text('.in'), out: text('.out:not(.err)'), error: text('.err'),
+      const img = e.querySelector('.picture img')
+      return { input: text('.in'), out: text('.code') || text('.out:not(.err)'), error: text('.err'),
+               katex: !!e.querySelector('.math .katex'), img: img ? img.naturalWidth : 0, alt: img ? img.alt : '',
                messages: [...e.querySelectorAll('.msg')].map(m => m.textContent) }
     })()`)
     check(entry.input === input && test(entry), `${build}: ${input}`, JSON.stringify(entry))
@@ -101,8 +118,18 @@ try {
 
   await open(url, 'wasm32')
   await evaluateCases('wasm32')
+  // KaTeX and its fonts come from web/vendor/katex, not from a CDN
+  const fonts = await js(`document.fonts.ready.then(() => [...document.fonts].filter(f => f.family.replace(/"/g, '') === 'KaTeX_Main' && f.status === 'loaded').length)`)
+  check(fonts > 0, 'KaTeX fonts loaded from the bridge', `${fonts} KaTeX_Main faces loaded`)
+  const external = await js(`performance.getEntriesByType('resource').map(r => r.name).filter(n => !n.startsWith(location.origin) && !n.startsWith('blob:'))`)
+  check(external.length === 0, 'the page loads nothing from other origins', external.join(' '))
+  // screen readers: a named input, announced status and results
+  const a11y = await js(`[document.getElementById('input').getAttribute('aria-label'), document.getElementById('status').getAttribute('role'),
+    document.getElementById('log').getAttribute('aria-live')]`)
+  check(a11y[0] && a11y[1] === 'status' && a11y[2] === 'polite', 'input labelled, status and results announced', JSON.stringify(a11y))
 
   await shot('light')
+  await shot('light-full', true)   // every entry, math included
   await view(1100, 900, true)
   await shot('dark')
   await view(390, 844, false)

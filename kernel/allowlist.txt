@@ -10,7 +10,8 @@ Part Span All None Automatic Null Infinity ComplexInfinity DirectedInfinity Inde
 
 # arithmetic and logic
 Plus Times Power Subtract Minus Divide Sqrt CubeRoot Surd Abs Sign Re Im Conjugate Arg Floor Ceiling Round IntegerPart FractionalPart Mod Quotient
-Equal Unequal Less LessEqual Greater GreaterEqual And Or Not Xor Implies Nand Nor Boole If Piecewise Max Min
+Equal Unequal Less LessEqual Greater GreaterEqual Inequality And Or Not Xor Implies Nand Nor Boole If Piecewise ConditionalExpression Max Min
+Interval Subscript
 Element NotElement Reals Integers Complexes Rationals Primes Algebraics Booleans
 
 # constants
@@ -32,10 +33,10 @@ ChineseRemainder ContinuedFraction Rationalize Numerator Denominator
 # algebra
 Simplify FullSimplify Refine Expand ExpandAll Factor Together Apart Cancel Collect TrigExpand TrigReduce TrigFactor TrigToExp ExpToTrig PowerExpand ComplexExpand FunctionExpand
 PolynomialQ PolynomialGCD PolynomialLCM PolynomialQuotient PolynomialRemainder PolynomialReduce Resultant Discriminant GroebnerBasis Coefficient CoefficientList Exponent Variables
-Solve NSolve Reduce FindInstance Eliminate Roots Root RootReduce ToRadicals Assumptions Assuming
+Solve NSolve Reduce FindInstance Eliminate Roots Root RootSum RootReduce ToRadicals Assumptions Assuming
 
 # calculus
-D Dt Derivative Integrate NIntegrate Limit Series SeriesCoefficient Normal Sum NSum Product NProduct DSolve DSolveValue NDSolve NDSolveValue RSolve RSolveValue
+D Dt Derivative Integrate NIntegrate Limit Direction Series SeriesCoefficient Normal Sum NSum Product NProduct DSolve DSolveValue NDSolve NDSolveValue RSolve RSolveValue
 LaplaceTransform InverseLaplaceTransform FourierTransform InverseFourierTransform ZTransform InverseZTransform Residue Grad Div Curl Laplacian
 Minimize Maximize NMinimize NMaximize FindMinimum FindMaximum FindRoot Interpolation
 
@@ -45,4 +46,17 @@ IdentityMatrix DiagonalMatrix ConstantArray Table Range Array Length Dimensions 
 Norm Normalize MatrixPower MatrixExp SingularValueDecomposition LUDecomposition QRDecomposition CholeskyDecomposition Mean Median Variance StandardDeviation
 
 # numerics and conversion
-N Chop Precision Accuracy SetPrecision NumberQ NumericQ ExactNumberQ InexactNumberQ RealDigits ToString InputForm FullForm TraditionalForm TeXForm StandardForm
+N Chop Precision Accuracy SetPrecision NumberQ NumericQ ExactNumberQ InexactNumberQ RealDigits RandomReal RandomInteger ToString InputForm FullForm TeXForm
+# (no StandardForm or TraditionalForm: ToString of those makes strings of box syntax, see WSBridge.wl)
+
+# graphics: plots come back as SVG pictures, raster images as PNG
+Plot Plot3D ParametricPlot ParametricPlot3D PolarPlot LogPlot LogLogPlot LogLinearPlot DiscretePlot
+ListPlot ListLinePlot ListLogPlot ListPlot3D ListPointPlot3D ListContourPlot ListDensityPlot
+ContourPlot ContourPlot3D DensityPlot RegionPlot RegionPlot3D VectorPlot StreamPlot ComplexPlot ComplexPlot3D
+Histogram BarChart PieChart Graphics Graphics3D Show GraphicsRow GraphicsColumn GraphicsGrid Legended Image
+Point Line Circle Disk Rectangle Polygon Arrow Text Sphere Cuboid Cylinder Cone
+Red Green Blue Black White Gray LightGray Orange Purple Yellow Brown Pink Cyan Magenta
+RGBColor Hue GrayLevel Opacity Thickness Thick Thin Dashed Dotted DotDashed PointSize Directive EdgeForm FaceForm Dashing
+PlotRange PlotLabel PlotStyle PlotLegends PlotPoints PlotTheme AxesLabel Axes Frame FrameLabel ImageSize AspectRatio
+MaxRecursion Mesh MeshStyle ColorFunction Filling Exclusions GridLines Ticks Background Boxed ViewPoint BoxRatios
+Large Medium Small Tiny Full Top Bottom Left Right Center

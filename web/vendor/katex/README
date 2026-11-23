@@ -1,0 +1,12 @@
+KaTeX 0.19.1 (https://katex.org), MIT license (see LICENSE), used by web/index.html to typeset
+the TeX of results. Unmodified files from the npm package katex@0.19.1:
+
+  katex.min.js, katex.min.css   from dist/
+  fonts/*.woff2                 from dist/fonts/ (the CSS lists woff2 first, so browsers never
+                                fetch the .woff/.ttf variants, which are left out)
+  LICENSE                       from the package root
+
+package.json only marks katex.min.js (a UMD script) as CommonJS for Node, where web/package.json
+would otherwise make it an ES module; tests/node_e2e.mjs loads it with createRequire.
+
+To update, replace these files with the same ones from a newer package.
