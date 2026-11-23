@@ -26,6 +26,7 @@ build/wasm:
 test: web/wxf.wasm
 	tests/run_codec_tests.sh
 	node tests/node_e2e.mjs
+	node tests/screenshots.mjs
 
 clean:
 	rm -rf build web/wxf.wasm

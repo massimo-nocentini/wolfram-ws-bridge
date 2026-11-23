@@ -110,6 +110,8 @@ tests/run_codec_tests.sh       # kernel writes 62 reference WXF files: decode+re
 # with a server running (WSBRIDGE_TOKEN=testtoken):
 node tests/node_e2e.mjs        # 83 checks: wasm codec round trips, kernel round trips, refusals, ordering
 .venv/bin/python tests/smoke_ws.py
+node tests/screenshots.mjs     # the test page in headless Chromium ($CHROME or chromium-headless):
+                               # 7 evaluations, no overflow at phone width; screenshots in build/screenshots/
 # with a server started with --time-limit 1 --memory-limit 200000000:
 .venv/bin/python tests/limits_test.py
 ```
