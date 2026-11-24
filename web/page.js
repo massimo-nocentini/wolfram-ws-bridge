@@ -6,7 +6,7 @@ import { WolframSocket, imageURL } from './wolfram-socket.js'
 
 export const params = new URLSearchParams(location.search)
 export const token = params.get('token') || ''
-export const wasmFile = params.get('wasm') === '64' ? 'wxf64.wasm' : 'wxf.wasm'   // ?wasm=64 selects the wasm64 build
+export const wasmFile = 'wxf.wasm'
 const wasmURL = new URL(`./${wasmFile}`, import.meta.url)   // relative: the page's query (the token) is not part of it
 const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?token=${encodeURIComponent(token)}`
 
@@ -20,7 +20,7 @@ export async function connect(status, changed = () => {}) {
     status('Connecting…')
     socket = await WolframSocket.open(url, wxf)
     socket.onclose = e => { status(`Disconnected (${e.code}).`); changed() }
-    status(`Connected to ${location.host} (${wxf.wasm64 ? 'wasm64' : 'wasm32'}).`)
+    status(`Connected to ${location.host}.`)
     changed()
     return true
   } catch (err) {

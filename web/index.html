@@ -92,7 +92,7 @@ const $ = id => document.getElementById(id)
 const status = text => { $('status').textContent = text }
 const MAX_ENTRIES = 100   // older entries are removed, and the URLs of their pictures released
 
-// links to the examples page keep the query (token, wasm build); the one after the JavaScript
+// links to the examples page keep the query (the token); the one after the JavaScript
 // examples moves with them
 const more = $('more-examples')
 $('examples-link').href = more.href = `examples.html${location.search}`

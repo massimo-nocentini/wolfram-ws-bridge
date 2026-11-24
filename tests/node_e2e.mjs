@@ -1,5 +1,5 @@
-// End-to-end test of web/wxf.js + web/wolfram-socket.js against a running bridge, run once with
-// web/wxf.wasm (wasm32) and once with web/wxf64.wasm (wasm64). The TeX of results must render with
+// End-to-end test of web/wxf.js + web/wolfram-socket.js, with web/wxf.wasm, against a running
+// bridge. The TeX of results must render with
 // the vendored KaTeX (web/vendor/katex), and graphics must come back as pictures. Also tests the
 // helpers of the JavaScript mode (web/js-helpers.js), alone and with expressions built with W,
 // and that the examples page's code (web/examples.js) is well formed (the browser test runs it).
@@ -37,7 +37,7 @@ const values = [
 async function suite(file) {
 prefix = file.replace('.wasm', '') + ': '
 const wxf = await WXF.load(await readFile(new URL(`../web/${file}`, import.meta.url)))
-check(wxf.wasm64 === file.includes('64'), `module is ${wxf.wasm64 ? 'wasm64' : 'wasm32'}`)
+check(wxf.x.wxf_pointer_size() === 4, 'module is wasm32')
 
 // 1. local round trips through the wasm codec
 for (const v of values) {
@@ -306,10 +306,8 @@ prefix = 'examples: '
     'titles and texts, code that compiles as a run body, at most 20 lines', bad.map(e => e.id).join(' '))
 }
 
-const bytes32 = await suite('wxf.wasm')
-const bytes64 = await suite('wxf64.wasm')
+await suite('wxf.wasm')
 prefix = ''
-check(isDeepStrictEqual(bytes32, bytes64), 'wasm32 and wasm64 encode every value to the same bytes')
 const wxf = await WXF.load(await readFile(new URL('../web/wxf.wasm', import.meta.url)))
 
 // 4. a wrong token is refused

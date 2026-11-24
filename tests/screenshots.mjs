@@ -3,11 +3,10 @@
 // pictures) and that nothing overflows at phone width,
 // and saves screenshots (light, light-full, dark, phone) to build/screenshots/; then runs JavaScript-mode
 // code (results, pictures, console lines, errors, refusals, Stop, the worker's isolation, messages
-// posted around the helpers) and saves screenshots of that mode (js-light, js-dark, js-phone); then
-// repeats the evaluations and runs with the wasm64 build (?wasm=64). The examples page
+// posted around the helpers) and saves screenshots of that mode (js-light, js-dark, js-phone). The examples page
 // (examples.html): every example run with its output checked, Stop, "Open in editor" (the code
 // in the test page's editor, not run; bad #js= links refused), screenshots (examples-light,
-// examples-full, examples-dark, examples-phone), with both builds.
+// examples-full, examples-dark, examples-phone).
 //   node tests/screenshots.mjs [page URL]     (default http://127.0.0.1:18000/?token=$WSBRIDGE_TOKEN)
 // The browser is $CHROME, or chromium-headless from PATH. Needs a running server.
 import { spawn } from 'node:child_process'
@@ -168,7 +167,7 @@ try {
       await sleep(100)
       status = (await js(`document.getElementById('status')?.textContent`)) || ''
     }
-    check(status.startsWith('Connected') && status.includes(`(${build})`), `${build}: page connects to the bridge`, status)
+    check(status.startsWith('Connected'), `${build}: page connects to the bridge`, status)
     if (!status.startsWith('Connected')) throw new Error('not connected')
   }
   const setMode = name => js(`document.querySelector('#modes [data-mode="${name}"]').click()`)
@@ -240,10 +239,10 @@ try {
   performance.getEntriesByType('resource').map(r => r.name), Object.keys(self), typeof WebSocket])`)
     const isolated = await jsEntry()
     const seen = isolated.lines[0]?.[1] || ''
-    // ... and loads the build of the page (?wasm=64: wxf64.wasm)
-    const module = build === 'wasm64' ? 'wxf64.wasm' : 'wxf.wasm', other = build === 'wasm64' ? 'wxf.wasm' : 'wxf64.wasm'
+    // ... and loads the codec itself, from the page's relative URL
+    const module = 'wxf.wasm'
     check(isolated.state === 'done' && seen.startsWith('["undefined","undefined","http') && seen.includes('js-runner.js') &&
-      seen.includes(`/${module}"`) && !seen.includes(`/${other}"`) && !seen.includes(token),
+      seen.includes(`/${module}"`) && !seen.includes(token),
       `${build}: JavaScript runs in a worker without the DOM or the token, with ${module}`, seen.slice(0, 400))
     // an endless loop: the page stays responsive, Stop ends the run, the next run works
     await startJS('let i = 0\nwhile (true) i++')
@@ -287,7 +286,6 @@ try {
   const examplesUrl = build => {
     const u = new URL('examples.html', url)
     u.search = new URL(url).search
-    if (build === 'wasm64') u.searchParams.set('wasm', '64')
     return u.href
   }
   // a card's run: like jsEntry, in the card's .result element
@@ -488,12 +486,6 @@ try {
   await shot('js-phone')
   await runExamples('wasm32')
   await examplesShots()
-
-  await view(1100, 900, false)
-  await open(url + (url.includes('?') ? '&' : '?') + 'wasm=64', 'wasm64')
-  await evaluateCases('wasm64')
-  await runCases('wasm64')
-  await runExamples('wasm64')
   ws.close()
   console.log(`screenshots in ${outDir}`)
 } catch (err) {

@@ -104,7 +104,7 @@ const el = (tag, props = {}, ...children) => {
   return e
 }
 
-$('back').href = `index.html${location.search}`   // keeps the token and the wasm build
+$('back').href = `index.html${location.search}`   // keeps the token
 
 // Code is highlighted by building text nodes and spans, never HTML: comments, strings, keywords and
 // the helpers. Strings come before comments only when they start earlier on the line.

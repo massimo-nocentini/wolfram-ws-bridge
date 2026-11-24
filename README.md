@@ -5,7 +5,7 @@ binary expression format) over a **WebSocket**, encoded and decoded by a small C
 to WebAssembly.
 
 ```
-browser: your JS ── wolfram-socket.js ── wxf.js ── wxf.wasm or wxf64.wasm (C codec)
+browser: your JS ── wolfram-socket.js ── wxf.js ── wxf.wasm (C codec)
             │  binary WebSocket messages, one WXF expression each
 server:  server/bridge.py (Python, websockets + pyzmq)
             │  local ZMQ socket per kernel
@@ -21,8 +21,8 @@ needs its normal Wolfram Engine license.
 | Path | What it is |
 |---|---|
 | `wxf/wxf.h`, `wxf/wxf.c` | WXF encoder/decoder in C, no libc, no allocation of its own (WSTP-like put calls; token reader) |
-| `wasm/wasm_api.c` | wasm32/wasm64 exports and a bump arena for the codec |
-| `web/wxf.wasm`, `web/wxf64.wasm` | the built modules, wasm32 and wasm64 (7 KB each, no imports); rebuild with `make` |
+| `wasm/wasm_api.c` | wasm exports and a bump arena for the codec |
+| `web/wxf.wasm` | the built module, wasm32 (7 KB, no imports); rebuild with `make` |
 | `web/wxf.js` | JS expressions ⇄ WXF bytes through the wasm module; `toInputForm(expr, limit)`: Wolfram Language text for display and templates |
 | `web/wolfram-socket.js` | WebSocket client: `evaluate(expr or string)` → Promise of the reply, `evaluateWXF(bytes)` for encoded requests; `toReply` for decoded reply bytes; `imageURL` for pictures |
 | `web/js-helpers.js` | helpers for JavaScript code: `W` (expressions such as `W.Sin(W.x)`), Wolfram Language text from templates, `toJS`, display text of any value; pure, also for Node |
@@ -44,7 +44,8 @@ needs its normal Wolfram Engine license.
 ```sh
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt   # or requirements.txt without tests
 make            # only needed after changing the C code: clang + wasm-ld (or rustup's rust-lld);
-                # builds web/wxf.wasm (wasm32) and web/wxf64.wasm (wasm64)
+                # builds web/wxf.wasm (wasm32); make wasm64 checks that the C code
+                # also builds for wasm64 (build/wxf64.wasm, not used by the page)
 ```
 
 The kernel wrapper binds `~/.WolframEngine` (license) into the container. Settings through the
@@ -248,7 +249,7 @@ lost when the code returns: the worker ends with the run.
 
 ### Examples page
 
-`/examples.html` (with the same `?token=…`, and `?wasm=64` for that build; linked from the test
+`/examples.html` (with the same `?token=…`; linked from the test
 page's header and after its JavaScript examples; the links between the two pages keep the query)
 has 14 short examples of the JavaScript mode in six sections: expressions built with `W` and with
 templates, a table from a loop, exact roots checked numerically, Newton's method with the
@@ -265,17 +266,12 @@ handling, and a loop that only Stop ends. The code lives in `web/examples.js`.
   sent to the server). A fragment that does not decode, or code longer than 20000 characters, is
   not loaded and a notice says so. Code from a link is never run by itself.
 
-### wasm32 or wasm64
+### The wasm module
 
-`WXF.load()` loads `wxf.wasm` (wasm32), which runs everywhere and is limited to 4 GiB of memory.
-For the wasm64 build, which needs memory64 support (Chrome/Edge 133+, Firefox 134+, Node 24+):
-
-```js
-const wxf = await WXF.load(new URL('./wxf64.wasm', import.meta.url))   // wxf.wasm64 === true
-```
-
-The JavaScript API is the same for both. On wasm64 the module's pointers and sizes are 64-bit
-(`BigInt` at the JS boundary); `wxf.js` converts them. The test page takes `?wasm=64`.
+`WXF.load()` loads `wxf.wasm`, the codec built for wasm32. It runs in every current browser and in
+Node, and its 4 GiB of memory is far more than the bridge's limits need (8 MiB requests, 64 MiB
+replies). The C code also builds for wasm64 (`make wasm64`, checked by `make test`), but `wxf.js`
+loads only the wasm32 build and refuses another.
 
 Expression mapping (see the top of `web/wxf.js`): integers ⇄ `number`/`BigInt`, reals ⇄ `WReal`
 (non-integer numbers also encode as reals), strings ⇄ `string`, `List` ⇄ `Array`, symbols ⇄
@@ -394,9 +390,9 @@ tests/run_codec_tests.sh       # kernel writes 62 reference WXF files: decode+re
                                # identical bytes; kernel reads files written by the codec (ASan/UBSan)
 # with a server running (WSBRIDGE_TOKEN=testtoken); each test takes another URL as its argument,
 # e.g. node tests/node_e2e.mjs 'ws://127.0.0.1:18100/ws?token=testtoken':
-node tests/node_e2e.mjs        # 366 checks, with wasm32 and wasm64: codec and kernel round trips, a 96 MiB
+node tests/node_e2e.mjs        # 192 checks: codec and kernel round trips, a 96 MiB
                                # value, refusals (also in association keys and of box syntax in strings),
-                               # picture limits, ordering; both builds must encode to the same bytes;
+                               # picture limits, ordering;
                                # TeX of 44 varied results must render with the vendored KaTeX
                                # (throwOnError), Range[1500] within 5 s, plots must come back as SVG,
                                # an Image as PNG; js-helpers.js (W, templates with control characters
@@ -409,14 +405,14 @@ node tests/node_e2e.mjs        # 366 checks, with wasm32 and wasm64: codec and k
                                      # 10000-symbol limit)
 node tests/screenshots.mjs     # the test page in headless Chromium ($CHROME or chromium-headless):
                                # 12 evaluations, 36 JavaScript runs and the 14 examples of the examples
-                               # page with each build (160 checks): math
+                               # page (85 checks): math
                                # typeset with KaTeX, Plot, Plot3D and ContourPlot pictures loaded, KaTeX
                                # fonts served by the bridge, nothing from other origins, no overflow at
                                # phone width (also with a 200-digit message), labelled input and live
                                # regions; JavaScript mode: wl, show, return values, console lines and
                                # their cap, errors with line numbers, refusals as rejections, templates,
                                # results changed in place, the cap of shown results, no DOM or token
-                               # in the worker and its own wasm build, an endless loop stopped with the
+                               # in the worker, which loads the codec itself, an endless loop stopped with the
                                # page responsive and the worker gone, Stop during kernel work, floods
                                # and malformed requests posted around the helpers (run ended, page
                                # responsive), drafts and remembered mode, a refused returned value shown

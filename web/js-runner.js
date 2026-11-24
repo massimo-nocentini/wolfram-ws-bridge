@@ -4,7 +4,7 @@
 // sends WXF bytes for the page to evaluate and decodes the reply bytes itself. The page shows only
 // replies that it got from the kernel itself, named by the id of their request.
 //
-// page -> worker: { type: 'init', wasm: URL of wxf.wasm or wxf64.wasm, code }
+// page -> worker: { type: 'init', wasm: URL of wxf.wasm, code }
 //                 { type: 'reply', id, bytes } or { type: 'reply', id, error }
 //                 { type: 'rendered', id, ok }     ok: false if the page no longer keeps that reply
 // worker -> page: { type: 'eval', id, bytes }       WXF of an expression to evaluate

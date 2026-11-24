@@ -1,4 +1,5 @@
-# make            build web/wxf.wasm (wasm32) and web/wxf64.wasm (wasm64, memory64)
+# make            build web/wxf.wasm (wasm32)
+# make wasm64     check that the codec also builds for wasm64 (build/wxf64.wasm; not used by the page)
 # make test       codec tests against the kernel, then the end-to-end tests (server must be running)
 
 CLANG ?= clang
@@ -12,12 +13,14 @@ WASM_CFLAGS = -O2 -ffreestanding -nostdlib -mbulk-memory -fvisibility=hidden -st
               -DWXF_REALLOC=wxf_arena_realloc
 WASM_LDFLAGS = --no-entry --strip-all --stack-first -z stack-size=65536
 
-all: web/wxf.wasm web/wxf64.wasm
+all: web/wxf.wasm
 
 web/wxf.wasm: build/wasm32/wxf.o build/wasm32/wasm_api.o
 	$(WASM_LD) $(WASM_LDFLAGS) -o $@ $^
 
-web/wxf64.wasm: build/wasm64/wxf.o build/wasm64/wasm_api.o
+wasm64: build/wxf64.wasm
+
+build/wxf64.wasm: build/wasm64/wxf.o build/wasm64/wasm_api.o
 	$(WASM_LD) -mwasm64 $(WASM_LDFLAGS) -o $@ $^
 
 build/wasm32/%.o: wxf/%.c wxf/wxf.h | build/wasm32
@@ -32,12 +35,12 @@ build/wasm64/%.o: wasm/%.c wxf/wxf.h | build/wasm64
 build/wasm32 build/wasm64:
 	mkdir -p $@
 
-test: all
+test: all wasm64
 	tests/run_codec_tests.sh
 	node tests/node_e2e.mjs
 	node tests/screenshots.mjs
 
 clean:
-	rm -rf build web/wxf.wasm web/wxf64.wasm
+	rm -rf build web/wxf.wasm
 
-.PHONY: all test clean
+.PHONY: all wasm64 test clean

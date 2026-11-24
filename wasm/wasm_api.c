@@ -52,7 +52,7 @@ void *wxf_arena_realloc(void *ctx, void *ptr, size_t old, size_t n) {
     return p;
 }
 
-/* 4 for wasm32, 8 for wasm64: on wasm64 pointer and size arguments and results are i64 (BigInt) */
+/* 4 for wasm32, 8 for wasm64: web/wxf.js refuses a module that is not the wasm32 build */
 EXPORT(wxf_pointer_size) int pointer_size(void) { return (int)sizeof(void *); }
 
 EXPORT(wxf_reset) void wasm_reset(void) {
