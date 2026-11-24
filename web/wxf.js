@@ -288,34 +288,82 @@ export class WXF {
   }
 }
 
-/** Wolfram Language text for an expression, close to InputForm (for display only). */
-export function toInputForm(e) {
-  if (typeof e === 'number' || typeof e === 'bigint') return String(e)
-  if (typeof e === 'string') return JSON.stringify(e)
-  if (typeof e === 'boolean') return e ? 'True' : 'False'
-  if (e === null || e === undefined) return 'Null'
-  if (e instanceof WSymbol) return e.name.replace(/^(System|Global)`/, '')
-  if (e instanceof WReal) return formatReal(e.value)
-  if (e instanceof WBigReal) return e.text
-  if (e instanceof Uint8Array) return `ByteArray[{${e.join(', ')}}]`
-  if (Array.isArray(e)) return `{${e.map(toInputForm).join(', ')}}`
-  if (e instanceof WArray) {
-    const list = toInputForm(e.toNested().map(function nest(v) {
-      return Array.isArray(v) && Array.isArray(v[0]) ? v.map(nest) : v
-    }))
-    return e.numeric ? `NumericArray[${list}, "${e.type}"]` : list
+const RULES = new Set(['Rule', 'RuleDelayed', 'System`Rule', 'System`RuleDelayed'])
+const isRule = e => e instanceof WFunction && e.head instanceof WSymbol && RULES.has(e.head.name) && e.args.length === 2
+const TOO_LONG = Symbol('too long')
+const BIG = 10n ** 1000n
+
+// a Wolfram string literal: \:XXXX for control characters, which JSON would write as \uXXXX (read
+// literally by Wolfram); a lone surrogate as U+FFFD, as the WXF encoder sends it
+const ESCAPES = { '\\': '\\\\', '"': '\\"', '\n': '\\n', '\t': '\\t', '\r': '\\r' }
+const wlString = s => `"${s.replace(/[\\"\0-\x1f\x7f-\x9f]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, c =>
+  ESCAPES[c] ?? (c >= '\ud800' ? '\\:fffd' : `\\:${c.charCodeAt(0).toString(16).padStart(4, '0')}`))}"`
+
+/**
+ * Wolfram Language text for an expression, close to InputForm: for display, and the text that
+ * js-helpers.js inserts into templates, so it reads back as the same expression. With a limit,
+ * the text ends with … after that many characters, without writing the rest of a large expression
+ * (an integer of more than 1000 digits is then <<about n digits>>).
+ */
+export function toInputForm(e, limit = Infinity) {
+  const parts = []
+  let length = 0
+  const put = s => { parts.push(s); length += s.length; if (length > limit) throw TOO_LONG }
+  const items = (open, list, close, item = write) => {
+    put(open)
+    for (let i = 0; i < list.length; i++) { if (i) put(', '); item(list[i]) }
+    put(close)
   }
-  if (e instanceof WAssociation) {
-    return `<|${e.entries.map(([k, v, d]) => `${toInputForm(k)} ${d ? ':>' : '->'} ${toInputForm(v)}`).join(', ')}|>`
-  }
-  if (e instanceof WFunction) {
-    const head = e.head instanceof WSymbol ? e.head.name : null
-    if ((head === 'Rule' || head === 'RuleDelayed') && e.args.length === 2) {
-      return `${toInputForm(e.args[0])} ${head === 'Rule' ? '->' : ':>'} ${toInputForm(e.args[1])}`
+  // a rule inside a rule's left side (or a head, or a key) needs parentheses: -> groups to the right
+  const operand = v => { if (isRule(v)) { put('('); write(v); put(')') } else write(v) }
+  const entry = ([k, v, delayed]) => { operand(k); put(delayed ? ' :> ' : ' -> '); write(v) }
+  function write(e) {
+    // a non-integer number as a real (1e-7 is 1.*^-7, not 1e-7); integers in full
+    if (typeof e === 'number') return put(Number.isInteger(e) ? BigInt(e).toString() : formatReal(e))
+    if (typeof e === 'bigint') {
+      // the decimal digits of a huge integer take seconds to compute
+      if (limit < Infinity && (e > BIG || e < -BIG)) {
+        const hex = (e < 0n ? -e : e).toString(16)   // log10 from the leading hex digits
+        const digits = Math.floor(Math.log10(parseInt(hex.slice(0, 12), 16)) + (hex.length - 12) * Math.log10(16)) + 1
+        return put(`${e < 0n ? '-' : ''}<<about ${digits} digits>>`)
+      }
+      return put(String(e))
     }
-    return `${toInputForm(e.head)}[${e.args.map(toInputForm).join(', ')}]`
+    if (typeof e === 'string') return put(wlString(e.length > limit ? e.slice(0, limit + 1) : e))
+    if (typeof e === 'boolean') return put(e ? 'True' : 'False')
+    if (e === null || e === undefined) return put('Null')
+    if (e instanceof WSymbol) return put(e.name.replace(/^(System|Global)`/, ''))
+    if (e instanceof WReal) return put(formatReal(e.value))
+    if (e instanceof WBigReal) return put(e.text)
+    if (e instanceof Uint8Array) return items('ByteArray[{', e, '}]', b => put(String(b)))
+    if (Array.isArray(e)) return items('{', e, '}')
+    if (e instanceof WArray) {
+      const list = e.toNested().map(function nest(v) {
+        return Array.isArray(v) && Array.isArray(v[0]) ? v.map(nest) : v
+      })
+      if (!e.numeric) return write(list)
+      put('NumericArray[')
+      write(list)
+      return put(`, "${e.type}"]`)
+    }
+    if (e instanceof WAssociation) return items('<|', e.entries, '|>', entry)
+    if (e instanceof WFunction) {
+      if (isRule(e)) return entry([...e.args, /RuleDelayed$/.test(e.head.name)])
+      operand(e.head)
+      return items('[', e.args, ']')
+    }
+    // Maps and plain objects encode as associations
+    const entries = e instanceof Map ? [...e] : Object.getPrototypeOf(e) === Object.prototype ? Object.entries(e) : null
+    if (entries) return items('<|', entries, '|>', ([k, v]) => entry([k, v, false]))
+    put(String(e))
   }
-  return String(e)
+  try {
+    write(e)
+  } catch (err) {
+    if (err !== TOO_LONG) throw err
+    return `${parts.join('').slice(0, limit)}…`
+  }
+  return parts.join('')
 }
 
 function formatReal(v) {

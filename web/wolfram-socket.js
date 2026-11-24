@@ -27,7 +27,8 @@ export class WolframSocket {
       const request = this.pending.shift()
       if (!request) return
       try {
-        request.resolve(this.#reply(new Uint8Array(event.data)))
+        const bytes = new Uint8Array(event.data)
+        request.resolve({ ...toReply(this.wxf.decode(bytes)), bytes })
       } catch (err) {
         request.reject(err)
       }
@@ -42,7 +43,8 @@ export class WolframSocket {
    * Evaluates an expression on the server. A string is sent as Wolfram Language input and parsed
    * there; anything else is encoded as an expression (see wxf.js).
    * Resolves to { success, result, inputForm, messages, timing, tex, image, format } or
-   * { success: false, failure, message, symbols }; `raw` holds the decoded reply.
+   * { success: false, failure, message, symbols }; `raw` holds the decoded reply and `bytes` its
+   * WXF bytes (for passing the reply on, e.g. to a worker, which decodes it with toReply).
    * result: undefined for a result larger than the kernel's $ResultLimit (inputForm is then
    * '-LargeResult-'); tex: the result as TeX (for KaTeX), absent for pictures; image:
    * { format: 'SVG', data: string } for graphics or { format: 'PNG', data: Uint8Array } for raster
@@ -51,7 +53,16 @@ export class WolframSocket {
    */
   evaluate(input) {
     if (this.ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error('the connection is not open'))
-    const bytes = this.wxf.encode(input)
+    return this.evaluateWXF(this.wxf.encode(input))
+  }
+
+  /**
+   * Like evaluate, for a request already encoded as WXF bytes (Uint8Array starting with "8:"),
+   * e.g. by another WXF instance in a worker. evaluate(Uint8Array) still sends a ByteArray.
+   */
+  evaluateWXF(bytes) {
+    if (this.ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error('the connection is not open'))
+    if (!(bytes instanceof Uint8Array)) return Promise.reject(new TypeError('evaluateWXF takes a Uint8Array of WXF'))
     return new Promise((resolve, reject) => {
       this.pending.push({ resolve, reject })
       this.ws.send(bytes)
@@ -59,27 +70,30 @@ export class WolframSocket {
   }
 
   close() { this.ws.close() }
+}
 
-  #reply(bytes) {
-    const raw = this.wxf.decode(bytes)
-    if (!(raw instanceof WAssociation)) throw new Error('unexpected reply from the server')
-    const o = raw.toObject()
-    const success = o.Success instanceof WSymbol && o.Success.name === 'True'
-    if (!success) return { success, failure: o.Failure, message: o.Message, symbols: o.Symbols || [], raw }
-    const image = o.Image instanceof WAssociation ? o.Image.toObject() : {}
-    const pictureOK = (image.Format === 'SVG' && typeof image.Data === 'string') ||
-      (image.Format === 'PNG' && image.Data instanceof Uint8Array)
-    return {
-      success,
-      result: o.Result,
-      inputForm: o.InputForm,
-      messages: o.Messages || [],
-      timing: o.Timing instanceof WReal ? o.Timing.value : o.Timing,
-      tex: typeof o.TeX === 'string' ? o.TeX : undefined,
-      image: pictureOK ? { format: image.Format, data: image.Data } : undefined,
-      format: typeof o.Format === 'string' ? o.Format : undefined,
-      raw,
-    }
+/**
+ * The reply object (see evaluate, without `bytes`) of a decoded reply from the bridge: for code
+ * that decodes the reply bytes itself, such as a worker given them by the page.
+ */
+export function toReply(raw) {
+  if (!(raw instanceof WAssociation)) throw new Error('unexpected reply from the server')
+  const o = raw.toObject()
+  const success = o.Success instanceof WSymbol && o.Success.name === 'True'
+  if (!success) return { success, failure: o.Failure, message: o.Message, symbols: o.Symbols || [], raw }
+  const image = o.Image instanceof WAssociation ? o.Image.toObject() : {}
+  const pictureOK = (image.Format === 'SVG' && typeof image.Data === 'string') ||
+    (image.Format === 'PNG' && image.Data instanceof Uint8Array)
+  return {
+    success,
+    result: o.Result,
+    inputForm: o.InputForm,
+    messages: o.Messages || [],
+    timing: o.Timing instanceof WReal ? o.Timing.value : o.Timing,
+    tex: typeof o.TeX === 'string' ? o.TeX : undefined,
+    image: pictureOK ? { format: image.Format, data: image.Data } : undefined,
+    format: typeof o.Format === 'string' ? o.Format : undefined,
+    raw,
   }
 }
 

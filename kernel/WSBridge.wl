@@ -11,7 +11,7 @@ WSBridge`$OutputLimit::usage = "Maximum length of the InputForm text of a result
 WSBridge`$FormatTimeLimit::usage = "Seconds allowed for the TeX or picture of a result, after the evaluation.";
 WSBridge`$ResultLimit::usage = "Largest result in bytes (ByteCount) that is sent back as an expression; a larger one comes without \"Result\".";
 WSBridge`$Allowed::usage = "Association of allowed System` symbol names.";
-Serve::usage = "Serve[endpoint] connects a ZMQ PAIR socket to endpoint, sends \"ready\" and then answers every request message with the WXF of EvaluateRequest[message], forever.";
+Serve::usage = "Serve[endpoint] connects a ZMQ PAIR socket to endpoint, sends \"ready\" and then answers every request message with the WXF of EvaluateRequest[message], forever; after each reply it removes the Global` symbols that reading the request created.";
 
 Begin["`Private`"];
 
@@ -40,12 +40,14 @@ withKeys[held_HoldComplete] := Prepend[heldKeys[held], held];
 
 (* fully qualified names of all symbols in a held expression, association keys included, that are not allowed *)
 refused[held_HoldComplete] := Union @@ (Cases[#,
-  s_Symbol :> With[{ctx = Context[Unevaluated[s]], name = SymbolName[Unevaluated[s]]},
+  s_Symbol :> With[{ctx = Quiet @ Context[Unevaluated[s]], name = SymbolName[Unevaluated[s]]},
     Which[
       ctx === "System`" && KeyExistsQ[WSBridge`$Allowed, name], Nothing,
       ctx === "Global`" && OwnValues[s] === {} && DownValues[s] === {} && UpValues[s] === {} &&
         SubValues[s] === {}, Nothing,
-      True, ctx <> name]],
+      (* WXF decodes a name it cannot take ("System`*") as a removed symbol *)
+      StringQ[ctx], ctx <> name,
+      True, "Removed[" <> name <> "]"]],
   {0, Infinity}, Heads -> True] & /@ withKeys[held]);
 
 (* The front end reads linear box syntax (\!\(...\), \(...\), \*Box[...]) in the strings it draws:
@@ -257,14 +259,77 @@ run[held_HoldComplete] := Module[{data, result, size, free, start, text, shown},
       <|"InputForm" -> text, "Messages" -> (messageText /@ data["MessagesExpressions"]), "Timing" -> data["AbsoluteTiming"]|>,
       shown]]];
 
-EvaluateRequest[bytes_ByteArray] := Module[{held, bad},
-  held = Quiet @ Check[BinaryDeserialize[bytes, HoldComplete], $Failed];
-  If[!MatchQ[held, _HoldComplete], Return[failure["Decode", "The request is not valid WXF."]]];
-  held = parse[held];
+(* Reading a request creates the symbols it names that do not exist yet: BinaryDeserialize reads
+   a name without a context as System`name (it ignores $Context) and takes any name in any
+   context, also ones that typed input cannot form ("a b", "*"); ToExpression creates the symbols
+   of typed input. A System` symbol left behind would change how later requests are read (typed
+   x would mean a refused System`x, and Global`x would clash with it), and one in a package's
+   context could stand in for a symbol of that package when it loads. So the symbols created
+   while a request is read are collected, as {context, name}; a request that created any outside
+   Global` is refused (an unknown System` name is not a variable), and the symbols created by a
+   request that is not evaluated are removed again. Those of an evaluated request are Global`
+   variables, removed once its reply is sent (Serve), so that many distinct names do not pile up
+   in the kernel. Global` symbols never shadow System` ones: typed input looks in System` first.
+   Reading stops at the symbol after the first $symbolLimit new ones, which bounds both the
+   symbols to remove and the work done outside the time limit. *)
+$symbolLimit = 10000;
+SetAttributes[newSymbols, HoldFirst];
+newSymbols[e_] := Module[{count = 0}, Replace[
+  Reap[Catch[Block[{$NewSymbol = (Sow[{#2, #1}, newSymbols]; If[++count > $symbolLimit, Throw[$tooMany, newSymbols]]) &}, e], newSymbols], newSymbols],
+  {r_, created_} :> {r, DeleteDuplicates @ Flatten[created, 1]}]];
+
+(* Remove of a string takes it as a pattern, and System`* is a symbol that WXF can make, so the
+   symbols are taken from one WXF list of their names instead (a string's WXF with the symbol type
+   byte). A System` name goes without its context ("System`*" does not decode, "*" does), except
+   the empty name, which only "System`" gives. Only symbols with nothing defined are removed:
+   never one that has been given anything, e.g. by a package loaded meanwhile. *)
+wxfName[{"System`", name_ /; name =!= ""}] := name;
+wxfName[{context_, name_}] := context <> name;
+varint[n_] := With[{d = Reverse[IntegerDigits[n, 128]]}, Join[BitOr[Most[d], 128], {Last[d]}]];
+symbolsWXF[pairs_] := With[{codes = ToCharacterCode[wxfName /@ pairs, "UTF-8"]},
+  ByteArray[Join[{56, 58, 102}, varint[Length[codes]], {115, 4}, ToCharacterCode["List"],
+    Flatten[{115, varint[Length[#]], #} & /@ codes]]]];
+removeSymbols[{}] := Null;
+removeSymbols[list_List] := Module[{pairs = DeleteDuplicates[list], wanted, held},
+  wanted = AssociationThread[pairs -> True];
+  held = Quiet @ BinaryDeserialize[symbolsWXF[pairs], HoldComplete];
+  If[!MatchQ[held, HoldComplete[_List]],
+    (* one name that does not decode spoils the list: then each on its own *)
+    If[Length[pairs] > 1, Scan[removeSymbols[{#}] &, pairs]]; Return[Null]];
+  Replace[Join @@ Cases[held, s_Symbol /; Quiet[KeyExistsQ[wanted, {Context[Unevaluated[s]], SymbolName[Unevaluated[s]]}]] &&
+      emptyQ[s] :> HoldComplete[s], {2}],
+    HoldComplete[s___] :> Quiet[Remove[s]]];];
+(* a name in two contexts gets the message s::shdw when the second one is made *)
+SetAttributes[emptyQ, HoldFirst];
+emptyQ[s_Symbol] := Attributes[s] === {} && OwnValues[s] === {} && DownValues[s] === {} &&
+  UpValues[s] === {} && SubValues[s] === {} && FormatValues[s] === {} &&
+  MatchQ[Messages[s], {(Verbatim[HoldPattern][HoldPattern[MessageName[_, "shdw"]]] :> _) ...}];
+(* the new variables of the last evaluated request, which Serve removes after its reply *)
+$created = {};
+
+(* a HoldComplete, or a failure; a name in two contexts (Global`x and a new System`x) is not one *)
+read[bytes_] := With[{held = Quiet @ Check[Quiet[BinaryDeserialize[bytes, HoldComplete], General::shdw], $Failed]},
+  If[MatchQ[held, _HoldComplete], parse[held], failure["Decode", "The request is not valid WXF."]]];
+
+(* the failure that refuses a request, or None *)
+refusal[$tooMany, _] := failure["NotAllowed",
+  "The request names more than " <> IntegerString[$symbolLimit] <> " symbols that do not exist yet."];
+refusal[held_, created_] := Module[{new = Cases[created, {c_, n_} /; c =!= "Global`" :> c <> n], bad},
   If[AssociationQ[held], Return[held]];
-  bad = refused[held];
-  If[bad =!= {}, Return[failure["NotAllowed", "The request uses symbols that are not allowed.", <|"Symbols" -> bad|>]]];
-  If[boxStringQ[held], Return[failure["NotAllowed", "Strings with box syntax (\\!, \\(, \\*) are not accepted."]]];
+  bad = Union[refused[held], new];
+  Which[
+    bad =!= {}, failure["NotAllowed", "The request uses symbols that are not allowed." <>
+      If[MemberQ[created, {"System`", _}], " A System` symbol that does not exist is not a variable; " <>
+        "in WXF a name without a context is in System`: send variables as Global`name.", ""],
+      <|"Symbols" -> bad|>],
+    boxStringQ[held], failure["NotAllowed", "Strings with box syntax (\\!, \\(, \\*) are not accepted."],
+    True, None]];
+
+EvaluateRequest[bytes_ByteArray] := Module[{held, created, refuse},
+  {held, created} = newSymbols[read[bytes]];
+  refuse = refusal[held, created];
+  If[refuse =!= None, removeSymbols[created]; Return[refuse]];
+  $created = Join[$created, created];
   run[held]];
 EvaluateRequest[_] := failure["Decode", "The request must be a ByteArray."];
 
@@ -284,7 +349,10 @@ Serve[endpoint_String] := Module[{socket, request, reply},
       BinarySerialize[failure["Aborted", "The reply could not be serialized."]]];
     (* "restart" comes before the reply, so that the bridge knows before it sends another request *)
     AbortProtect[If[$restart, SocketWriteMessage[socket, StringToByteArray["restart"]]]; SocketWriteMessage[socket, reply]];
-    If[$restart, Quiet[Close[socket]]; Exit[0]]]];
+    If[$restart, Quiet[Close[socket]]; Exit[0]];
+    (* the reply is sent: the variables that its request created can go *)
+    CheckAbort[removeSymbols[$created], Null];
+    $created = {}]];
 
 End[];
 EndPackage[];

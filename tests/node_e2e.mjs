@@ -1,13 +1,17 @@
 // End-to-end test of web/wxf.js + web/wolfram-socket.js against a running bridge, run once with
 // web/wxf.wasm (wasm32) and once with web/wxf64.wasm (wasm64). The TeX of results must render with
-// the vendored KaTeX (web/vendor/katex), and graphics must come back as pictures.
+// the vendored KaTeX (web/vendor/katex), and graphics must come back as pictures. Also tests the
+// helpers of the JavaScript mode (web/js-helpers.js), alone and with expressions built with W,
+// and that the examples page's code (web/examples.js) is well formed (the browser test runs it).
 //   node tests/node_e2e.mjs [ws://127.0.0.1:18000/ws?token=...]   (token defaults to $WSBRIDGE_TOKEN)
 import { resolveObjectURL } from 'node:buffer'
 import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { isDeepStrictEqual } from 'node:util'
-import { WXF, WArray, WAssociation, WBigReal, fn, real, sym, toInputForm } from '../web/wxf.js'
-import { WolframSocket, imageURL } from '../web/wolfram-socket.js'
+import { WXF, WArray, WAssociation, WBigReal, WFunction, WReal, WSymbol, fn, real, sym, toInputForm } from '../web/wxf.js'
+import { WolframSocket, imageURL, toReply } from '../web/wolfram-socket.js'
+import { W, formatValue, isTemplateCall, isWolframValue, requestOf, toJS, wlText } from '../web/js-helpers.js'
+import { SECTIONS } from '../web/examples.js'
 
 const katex = createRequire(import.meta.url)('../web/vendor/katex/katex.min.js')
 
@@ -186,11 +190,120 @@ for (const r of [plot, image]) {
   check(blob?.type === type && blob.size === new Blob([r.image.data]).size, `imageURL gives a ${type} Blob`)
 }
 
+// 5. expressions built with W (web/js-helpers.js): the same bytes as with fn and sym, evaluated
+// by the kernel; a variable sent with W leaves typed input of the same name working
+const gx = sym('Global`x')
+const BUILT = [
+  [W.x, gx], [W.Sin(W.x), fn('Sin', gx)], [W.Integrate(W.Power(W.x, 2), W.x), fn('Integrate', fn('Power', gx, 2), gx)],
+  [W['Global`y'], sym('Global`y')], [W.f(1, 'a'), fn(sym('Global`f'), 1, 'a')], [W.Pi, sym('Pi')],
+  [fn(W.Derivative(1), W.Sin), fn(fn('Derivative', 1), sym('Sin'))], [[W.x, W.Plus(W.x, 1)], [gx, fn('Plus', gx, 1)]],
+]
+for (const [w, plain] of BUILT) {
+  const bytes = wxf.encode(w)
+  check(isDeepStrictEqual(bytes, wxf.encode(plain)) && isDeepStrictEqual(wxf.decode(bytes), plain), `W-built ${toInputForm(w)} encodes like ${toInputForm(plain)}`)
+}
+await expect(W.Integrate(W.Power(W.x, 2), W.x), r => r.success && r.inputForm === 'x^3/3' && isDeepStrictEqual(r.result, fn('Times', fn('Rational', 1, 3), fn('Power', gx, 3))))
+await expect(W.D(W.Sin(W.Times(2, W.x)), W.x), r => r.success && r.inputForm === '2*Cos[2*x]')
+await expect(W.f(W.x), r => r.success && r.inputForm === 'f[x]', 'W.f(W.x) is f[x], a Global` function without definitions')
+await expect('x + 1', r => r.success && r.inputForm === '1 + x', 'typed x is still Global`x after W.x was sent')
+await expect(W.Run('id'), r => !r.success && r.failure === 'NotAllowed' && r.symbols.includes('System`Run'), 'W.Run(...) is refused')
+// W.WsbJsA is System`WsbJsA, which does not exist: refused, and removed again by the kernel, so
+// that the variable of that name still works afterwards, sent with its context or typed
+await expect(W.Plus(W.WsbJsA, 1), r => !r.success && r.failure === 'NotAllowed' && isDeepStrictEqual(r.symbols, ['System`WsbJsA']), 'W.WsbJsA (a System` name that does not exist) is refused')
+await expect(W.Plus(W['Global`WsbJsA'], 1), r => r.success && r.inputForm === '1 + WsbJsA', "W['Global`WsbJsA'] works after W.WsbJsA was refused")
+await expect('WsbJsA + 2', r => r.success && r.inputForm === '2 + WsbJsA', 'typed WsbJsA is still the variable after W.WsbJsA was refused')
+await expect(wlText`Solve[${W.Power(W.x, 2)} == ${4}, x]`, r => r.success && toInputForm(r.result) === '{{x -> -2}, {x -> 2}}')
+await expect(wlText`N[\[Pi], ${20}]`, r => r.success && r.result instanceof WBigReal && r.inputForm.startsWith('3.14159265358979323846'))
+await expect(wlText`{${'a"b\\'}, ${2.5}, ${-3}}`, r => r.success && isDeepStrictEqual(r.result, ['a"b\\', real(2.5), -3]))
+// control characters as \:XXXX (JSON's \uXXXX would be read literally), a lone surrogate as U+FFFD like WXF
+await expect(wlText`{${'a\u0001b\u007f\u0085'}, ${'tab\tnl\ncr\r\b\f'}, ${'p\ud800q'}}`,
+  r => r.success && isDeepStrictEqual(r.result, ['a\u0001b\u007f\u0085', 'tab\tnl\ncr\r\b\f', 'p\ufffdq']), 'template strings with control characters reach the kernel unchanged')
+// a rule on a rule's left side keeps its parentheses (-> groups to the right)
+await expect(wlText`{${fn('Rule', fn('Rule', 1, 2), 3)}, ${fn('RuleDelayed', fn('Rule', W.a, 2), 3)}, ${new WAssociation([[fn('Rule', 1, 2), 3, false]])}}`,
+  r => r.success && isDeepStrictEqual(r.result, [fn('Rule', fn('Rule', 1, 2), 3), fn('RuleDelayed', fn('Rule', sym('Global`a'), 2), 3), new WAssociation([[fn('Rule', 1, 2), 3, false]])]),
+  'template rules nested on the left read back as the same expression')
+const plain = await socket.evaluate('{1, 2.5, True, False, Null, <|"a" -> {1}, "b" -> 2.|>, <|1 -> x|>, N[{{1, 2}, {3, 4}}]}')
+check(plain.success && isDeepStrictEqual(toJS(plain.result), [1, 2.5, true, false, null, { a: [1], b: 2 }, new Map([[1, gx]]), [[1, 2], [3, 4]]]),
+  'toJS of a kernel result', JSON.stringify(toJS(plain.result), (k, v) => v instanceof Map ? [...v] : v))
+// already encoded requests (as from the page's worker) and the reply bytes
+const { bytes: replyBytes, ...pre } = await socket.evaluateWXF(wxf.encode(W.Plus(1, 2)))
+check(pre.success && pre.result === 3 && replyBytes instanceof Uint8Array && isDeepStrictEqual(toReply(wxf.decode(replyBytes)), pre),
+  'evaluateWXF sends encoded bytes; the reply bytes decode to the same reply with toReply')
+await expect(new Uint8Array([1, 2]), r => r.success && isDeepStrictEqual(r.result, new Uint8Array([1, 2])), 'evaluate(Uint8Array) still sends a ByteArray')
+
 // several requests in flight at once come back in order
 const many = await Promise.all([1, 2, 3, 4, 5].map(n => socket.evaluate(`${n}^${n}`)))
 check(isDeepStrictEqual(many.map(r => r.result), [1, 4, 27, 256, 3125]), 'pipelined requests answered in order')
 socket.close()
 return values.map(v => wxf.encode(v))
+}
+
+// the JavaScript mode's helpers alone (web/js-helpers.js)
+prefix = 'js-helpers: '
+{
+  const x = W.x
+  check(x instanceof WSymbol && typeof x === 'function' && x.name === 'Global`x' && toInputForm(x) === 'x', 'W.x is the variable x, a WSymbol')
+  check(W.Sin.name === 'Sin' && W.$MachinePrecision.name === '$MachinePrecision' && W['Global`A'].name === 'Global`A' && W.myVar.name === 'Global`myVar',
+    'capitalized names are System` symbols, others Global`, explicit contexts kept')
+  const f1 = W.f(1)
+  check(f1 instanceof WFunction && f1.head instanceof WSymbol && f1.head.name === 'Global`f' && toInputForm(f1) === 'f[1]', 'W.f(1) is f[1]')
+  check(toInputForm(W.Integrate(W.Power(x, 2), x)) === 'Integrate[Power[x, 2], x]' && isDeepStrictEqual(W.Sin(x).head, sym('Sin')) && W.Sin(x).args[0] === x,
+    'W.Integrate(W.Power(x, 2), x) builds Integrate[x^2, x]')
+  check(W.then === undefined && W[Symbol.iterator] === undefined && (await Promise.resolve(x)) === x, 'W and its symbols pass through promises')
+  check(wlText`N[\[Pi]] + 1` === 'N[\\[Pi]] + 1', 'template keeps raw backslashes', wlText`N[\[Pi]]`)
+  const nums = wlText`f[${3}, ${-2.5}, ${1e-7}, ${10n ** 30n}, ${1e21}]`
+  check(nums === 'f[(3), (-2.5), (1.*^-7), (1000000000000000000000000000000), (1000000000000000000000)]', 'template inserts numbers as Wolfram numbers', nums)
+  const strs = wlText`StringLength[${'a"b\\c'}]`
+  check(strs === 'StringLength[("a\\"b\\\\c")]', 'template inserts strings as Wolfram strings', strs)
+  const exprs = wlText`Solve[${W.Power(x, 2)} == ${real(4)}, x] /. ${{ a: 1 }}`
+  check(exprs === 'Solve[(Power[x, 2]) == (4.), x] /. (<|"a" -> 1|>)', 'template inserts expressions in parentheses', exprs)
+  check(toInputForm(fn('Rule', fn('Rule', 1, 2), 3)) === '(1 -> 2) -> 3' && toInputForm(fn('Rule', 1, fn('Rule', 2, 3))) === '1 -> 2 -> 3' &&
+    toInputForm(new WAssociation([[fn('Rule', 1, 2), 3, true]])) === '<|(1 -> 2) :> 3|>' && toInputForm(fn(fn('Rule', 1, 2), 3)) === '(1 -> 2)[3]',
+    'InputForm puts a rule on the left of a rule, as a key or as a head, in parentheses')
+  const escaped = toInputForm('a\u0001"\\\n\t\r\u007f\ud800😀')
+  check(escaped === '"a\\:0001\\"\\\\\\n\\t\\r\\:007f\\:fffd😀"', 'InputForm of strings uses Wolfram escapes', escaped)
+  // with a limit, the text of a huge value stops early: no seconds spent on decimal digits or on
+  // writing a million elements
+  const t0 = performance.now()
+  const short = [toInputForm(10n ** 300000n, 300), toInputForm(Array(1e6).fill(real(1.5)), 300), toInputForm('q'.repeat(1e7), 300)]
+  check(short[0] === '<<about 300001 digits>>' && short[1].length === 301 && short[1].endsWith('…') && short[2].length === 301 && performance.now() - t0 < 1000 &&
+    toInputForm([1, 2], 300) === '{1, 2}', 'InputForm with a limit is bounded', `${short[0]} ${Math.round(performance.now() - t0)} ms`)
+  let threw = 0
+  for (const bad of [NaN, Infinity, () => 1, Symbol('s')]) { try { wlText`f[${bad}]` } catch { threw++ } }
+  check(threw === 4, 'template refuses NaN, Infinity, functions and JS symbols')
+  check(isTemplateCall([['a'], 1]) === false && isTemplateCall((s => [s])`a`) && requestOf(['Sin[x]']) === 'Sin[x]' &&
+    requestOf([Object.assign(['N[', ']'], { raw: ['N[', ']'] }), 2]) === 'N[(2)]', 'calls and tagged templates told apart')
+  const js = toJS([real(1.5), sym('True'), sym('False'), sym('Null'), sym('System`True'), sym('Pi'),
+    new WAssociation([['a', real(2), false], ['__proto__', [sym('True')], false]]), new WAssociation([[1, 'one', false]]),
+    new WArray(false, 'Integer32', [2, 2], new Int32Array([1, 2, 3, 4])), fn('Sin', real(1))])
+  check(js[0] === 1.5 && js[1] === true && js[2] === false && js[3] === null && js[4] === true && js[5] instanceof WSymbol &&
+    Object.getPrototypeOf(js[6]) === Object.prototype && Object.hasOwn(js[6], '__proto__') && isDeepStrictEqual(js[6].__proto__, [true]) && js[6].a === 2 &&
+    js[7] instanceof Map && js[7].get(1) === 'one' && isDeepStrictEqual(js[8], [[1, 2], [3, 4]]) && js[9] instanceof WFunction && js[9].args[0] instanceof WReal,
+    'toJS: reals, True/False/Null, associations (Map for other keys), arrays; other expressions unchanged')
+  const cyclic = [1]; cyclic.push(cyclic)
+  check([x, W.f(1), real(1), new WBigReal('1.`20'), new WAssociation(), new WArray(false, 'Real64', [1], new Float64Array(1)), [1, [2, [x]]]].every(v => isWolframValue(v)) &&
+    ![1, 'x', [1, [2]], { a: x }, null, undefined, cyclic, () => 1].some(v => isWolframValue(v)), 'Wolfram values told from plain JS values')
+  const o = { n: 1n, s: 'x', list: [x, fn('Rule', x, 2)], f() {}, d: undefined }
+  o.self = o
+  check(formatValue('as is') === 'as is' && formatValue(o) === '{n: 1n, s: "x", list: {x, x -> 2}, f: [Function f], d: undefined, self: [Circular]}' &&
+    formatValue([[fn('Rule', x, -2)]]) === '{{x -> -2}}' && formatValue(new Map([[1, [2n]]])) === 'Map(1) {1 => [2n]}' &&
+    formatValue(new Error('bad')) === 'Error: bad' && formatValue(Array(1e6).fill(7)).length < 1000 && formatValue('y'.repeat(20000)).length === 10001,
+    'formatValue: JSON-like, BigInt, cycles, functions, InputForm of expressions, bounded', formatValue(o))
+}
+
+// the examples of examples.html (web/examples.js): well formed; tests/screenshots.mjs runs them
+prefix = 'examples: '
+{
+  const examples = SECTIONS.flatMap(s => s.examples)
+  const AsyncFunction = (async () => {}).constructor
+  const params = ['W', 'wl', 'show', 'sym', 'fn', 'real', 'toInputForm', 'toJS', 'WSymbol', 'WFunction', 'WReal', 'WBigReal', 'WAssociation', 'WArray']
+  const bad = examples.filter(e => {
+    try { new AsyncFunction(...params, e.code) } catch { return true }
+    return !/^[a-z0-9-]+$/.test(e.id) || !e.title || !e.text || e.code.split('\n').length > 20 || encodeURIComponent(e.code).length > 9 * 20000
+  })
+  check(examples.length >= 10 && examples.length <= 14 && new Set(examples.map(e => e.id)).size === examples.length && bad.length === 0 &&
+    SECTIONS.every(s => s.title && s.text && s.examples.length), `${examples.length} examples in ${SECTIONS.length} sections: unique ids, ` +
+    'titles and texts, code that compiles as a run body, at most 20 lines', bad.map(e => e.id).join(' '))
 }
 
 const bytes32 = await suite('wxf.wasm')

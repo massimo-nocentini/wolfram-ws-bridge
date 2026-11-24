@@ -7,8 +7,9 @@
   "exports": {
     ".": "./wolfram-socket.js",
     "./wxf": "./wxf.js",
+    "./js-helpers": "./js-helpers.js",
     "./wxf.wasm": "./wxf.wasm",
     "./wxf64.wasm": "./wxf64.wasm"
   },
-  "files": ["wxf.js", "wolfram-socket.js", "wxf.wasm", "wxf64.wasm"]
+  "files": ["wxf.js", "wolfram-socket.js", "js-helpers.js", "wxf.wasm", "wxf64.wasm"]
 }

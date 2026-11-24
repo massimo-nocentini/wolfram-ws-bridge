@@ -277,8 +277,10 @@ async def main():
     token = os.environ.get("WSBRIDGE_TOKEN") or secrets.token_urlsafe(24)
     origins = {f"http://{h}:{args.port}" for h in ("127.0.0.1", "localhost", args.host)} | set(args.allow_origin)
 
-    run_dir = ROOT / "run"
-    run_dir.mkdir(exist_ok=True)
+    # one directory per port: servers started from the same checkout must not share the limits
+    # their kernels load, or overwrite each other's kernel logs
+    run_dir = ROOT / "run" / ("port-%d" % args.port)
+    run_dir.mkdir(parents=True, exist_ok=True)
     config = run_dir / "config.wl"
     config.write_text(
         f"WSBridge`$TimeLimit = {args.time_limit!r};\nWSBridge`$MemoryLimit = {args.memory_limit};\n"

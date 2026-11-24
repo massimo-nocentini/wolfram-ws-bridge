@@ -23,7 +23,7 @@ RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -r req
 COPY server/ server/
 COPY kernel/WSBridge.wl kernel/allowlist.txt kernel/
 COPY web/ web/
-# run/ holds the kernel configuration and logs
+# run/port-<port>/ holds the kernel configuration and logs
 RUN mkdir run && chown wolframengine:wolframengine run \
  && /opt/venv/bin/python server/bridge.py --help > /dev/null
 

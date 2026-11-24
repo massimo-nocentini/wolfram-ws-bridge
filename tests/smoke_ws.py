@@ -1,5 +1,5 @@
-"""End-to-end smoke test of the bridge with Python: text and WXF requests, refusals, limits, and
-the TeX or picture that comes with a result.
+"""End-to-end smoke test of the bridge with Python: text and WXF requests, refusals, limits, the
+TeX or picture that comes with a result, and symbols that refused requests must not leave behind.
     .venv/bin/python tests/smoke_ws.py [ws://127.0.0.1:18000/ws?token=testtoken]"""
 import asyncio, sys
 from urllib.parse import urlsplit
@@ -13,6 +13,8 @@ ORIGIN = "http://" + urlsplit(URL).netloc    # the page's origin, which the brid
 
 NOT_ALLOWED = lambda reply: reply.get("Failure") == "NotAllowed"
 RUN_REFUSED = lambda reply: NOT_ALLOWED(reply) and "System`Run" in reply.get("Symbols", ())
+REFUSED = lambda *names: lambda reply: NOT_ALLOWED(reply) and sorted(reply.get("Symbols", ())) == sorted(names)
+INPUT_FORM = lambda text: lambda reply: reply.get("InputForm") == text
 
 # (request, success expected, optional test of the reply); successful replies carry "TeX", or
 # "Image" for graphics
@@ -37,6 +39,35 @@ CASES = [
     # box syntax in strings, which the front end would read when it draws a label
     (export(wl.Graphics(wl.Text("\\!\\(x\\)")), target_format="wxf"), False, NOT_ALLOWED),
     ('Graphics[Text["\\.5c!\\.5c(x\\.5c)"]]', False, NOT_ALLOWED),
+    # a WXF symbol without a context is a System` symbol, which reading the request creates: it
+    # is refused and removed again, so that the name still means the variable in later requests
+    (export(wl.Plus(wl.WsbQzz, 1), target_format="wxf"), False, REFUSED("System`WsbQzz")),
+    ("WsbQzz + 1", True, INPUT_FORM("1 + WsbQzz")),
+    (export(wl.Plus(wl.Global.WsbQzz, 2), target_format="wxf"), True, INPUT_FORM("2 + WsbQzz")),
+    (export(wl.WsbQzz, target_format="wxf"), False, REFUSED("System`WsbQzz")),   # not Decode
+    (export(wl.Global.WsbQzz, target_format="wxf"), True, INPUT_FORM("WsbQzz")),
+    # the same name sent first with a context, then without
+    (export(wl.Plus(wl.Global.WsbB, 1), target_format="wxf"), True, INPUT_FORM("1 + WsbB")),
+    (export(wl.WsbB, target_format="wxf"), False, REFUSED("System`WsbB")),
+    ("WsbB + 1", True, INPUT_FORM("1 + WsbB")),
+    # typed System`name, and names that typed input cannot form, refused without a trace
+    ("System`WsbNew + 1", False, REFUSED("System`WsbNew")),
+    ("WsbNew + 1", True, INPUT_FORM("1 + WsbNew")),
+    ('{Run["id"], Wsb`Ctx`v, wsbLeft}', False, REFUSED("System`Run", "Wsb`Ctx`v")),
+    (b"8:f\x02s\x04Lists\x01*s\x03a b", False, REFUSED("System`*", "System`a b")),
+    (b"8:f\x02s\x04Lists\x03Wsb", False, lambda reply: reply.get("Failure") == "Decode"),   # cut short
+    ("Wsb + 1", True, INPUT_FORM("1 + Wsb")),
+    # the System` symbol with the empty name (WXF "System`") is removed too: the second request
+    # creates it again
+    (b"8:s\x07System`", False, lambda reply: REFUSED("System`")(reply) and "does not exist" in reply["Message"]),
+    (b"8:s\x07System`", False, lambda reply: REFUSED("System`")(reply) and "does not exist" in reply["Message"]),
+    # reading stops after 10000 new symbols: refused, and the symbols read so far are removed
+    (export([getattr(wl, "WsbCap%d" % i) for i in range(10002)], target_format="wxf"), False,
+     lambda reply: NOT_ALLOWED(reply) and "more than 10000" in reply["Message"]),
+    ("WsbCap5 + WsbCap10000 + 1", True, INPUT_FORM("1 + WsbCap10000 + WsbCap5")),
+    ("Length[{%s}]" % ", ".join("wsbT%d" % i for i in range(10001)), False,
+     lambda reply: NOT_ALLOWED(reply) and "more than 10000" in reply["Message"]),
+    ("Length[{%s}]" % ", ".join("wsbT%d" % i for i in range(10000)), True, INPUT_FORM("10000")),
 ]
 
 
@@ -58,7 +89,7 @@ async def main():
             reply = binary_deserialize(await ws.recv())
             good = reply["Success"] == ok and (not ok or shown(reply)) and all(t(reply) for t in test)
             failed += not good
-            label = request if isinstance(request, str) else "WXF %d bytes" % len(request)
+            label = request[:80] if isinstance(request, str) else "WXF %d bytes" % len(request)
             detail = reply.get("InputForm") or "%s: %s %s" % (reply.get("Failure"), reply.get("Message"), reply.get("Symbols", ""))
             extra = ("[%s]" % reply["Image"]["Format"]) if "Image" in reply else ("[TeX]" if "TeX" in reply else "")
             print("ok  " if good else "FAIL", label, "->", detail[:100], extra, reply.get("Messages") or "")

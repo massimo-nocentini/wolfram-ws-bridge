@@ -23,9 +23,13 @@ needs its normal Wolfram Engine license.
 | `wxf/wxf.h`, `wxf/wxf.c` | WXF encoder/decoder in C, no libc, no allocation of its own (WSTP-like put calls; token reader) |
 | `wasm/wasm_api.c` | wasm32/wasm64 exports and a bump arena for the codec |
 | `web/wxf.wasm`, `web/wxf64.wasm` | the built modules, wasm32 and wasm64 (7 KB each, no imports); rebuild with `make` |
-| `web/wxf.js` | JS expressions ⇄ WXF bytes through the wasm module; `toInputForm` for display |
-| `web/wolfram-socket.js` | WebSocket client: `evaluate(expr or string)` → Promise of the reply; `imageURL` for pictures |
-| `web/index.html` | test page served by the bridge: math typeset with KaTeX, plots and images as pictures |
+| `web/wxf.js` | JS expressions ⇄ WXF bytes through the wasm module; `toInputForm(expr, limit)`: Wolfram Language text for display and templates |
+| `web/wolfram-socket.js` | WebSocket client: `evaluate(expr or string)` → Promise of the reply, `evaluateWXF(bytes)` for encoded requests; `toReply` for decoded reply bytes; `imageURL` for pictures |
+| `web/js-helpers.js` | helpers for JavaScript code: `W` (expressions such as `W.Sin(W.x)`), Wolfram Language text from templates, `toJS`, display text of any value; pure, also for Node |
+| `web/js-runner.js` | module worker that runs the code of the test page's JavaScript mode (and of the examples page) |
+| `web/page.js` | what both pages share: connecting, showing a reply (KaTeX, pictures, text), JavaScript runs in a worker with their checks and limits |
+| `web/index.html` | test page served by the bridge, with Wolfram Language and JavaScript input: math typeset with KaTeX, plots and images as pictures |
+| `web/examples.html`, `web/examples.js` | examples page for the JavaScript mode (`/examples.html`): 14 examples to run in place or open in the test page's editor |
 | `web/vendor/katex/` | KaTeX 0.19.1 (MIT), vendored from the npm package: script, CSS, woff2 fonts (see its README) |
 | `server/bridge.py` | WebSocket + static HTTP server, kernel pool with watchdog |
 | `kernel/WSBridge.wl` | kernel side: decode, allowlist check, time/memory limits, TeX and pictures of results, request loop |
@@ -143,7 +147,14 @@ const b = await socket.evaluate(fn('Factor', fn('Plus', fn('Power', x, 4), -1)))
 // a.format (undefined unless the TeX or picture ran out of time or memory: "TimeLimit"...)
 // a.result is undefined for a result above 16 MiB (ByteCount); its inputForm is then "-LargeResult-"
 // failures: { success: false, failure: "NotAllowed" | "Syntax" | "TimeLimit" | ..., message, symbols }
+// every reply also has raw (the decoded reply) and bytes (its WXF)
 ```
+
+A symbol name without a context is a `System`` symbol in WXF: write variables as `sym('Global`x')`
+(`sym('x')` is `System`x`, which the kernel does not have, so the request is refused as
+`NotAllowed`; nothing stays behind, see Security). `socket.evaluateWXF(bytes)` sends a request that is already
+WXF (`evaluate(Uint8Array)` sends a `ByteArray`), and `toReply(wxf.decode(reply.bytes))` turns
+reply bytes back into the reply object, e.g. in a worker that got them from the page.
 
 ### Showing results
 
@@ -169,6 +180,90 @@ always there. The test page does exactly this, with the KaTeX copy in `web/vendo
 (no CDN; `trust`, `maxSize` and `maxExpand` given explicitly, and a wider `\arraystretch` so that
 matrices of fractions do not touch), pictures on a white card so that black axes stay readable in
 dark mode, and the InputForm under each formula to copy.
+
+### JavaScript mode of the test page
+
+The switch above the input chooses between Wolfram Language and JavaScript input (remembered per
+browser; each mode keeps its own text; the button says Evaluate or Run, and Ctrl/Cmd+Enter runs
+either). JavaScript code is the body of an async function, so `await` works and a returned value
+is shown:
+
+```js
+const p = await wl('Expand[(x - 1) (x - 2) (x - 3)]')      // a string is Wolfram Language text
+console.log('p =', p)                                       // a line under the code: p = Plus[-6, Times[11, x], ...]
+await show(W.Plot(W.Sin(W.x), [W.x, 0, 6]))                 // shown like a Wolfram-mode result
+return wl`Solve[${p} == 0, x]`                              // typeset: {{x -> 1}, {x -> 2}, {x -> 3}}
+```
+
+- `W.name` is a symbol that can also be called as a head: `W.Sin(W.x)` is `Sin[x]`,
+  `W.Integrate(W.Power(W.x, 2), W.x)` is `Integrate[x^2, x]`, `W.f(1)` is `f[1]`. Names that start
+  with a capital letter or `$` are `System`` symbols (`W.Pi`, `W.C`); others are variables in
+  `Global`` (`W.x` is `Global`x`); `W['Global`A']` is a variable with a capital letter. `W.A` is
+  `System`A`, which does not exist, so a request with it is refused (`NotAllowed`, with
+  `System`A` in `symbols`) and leaves nothing behind: later requests with `A` work as before.
+  Symbols are `WSymbol`s (`instanceof WSymbol`), so they encode and print like `sym(...)`.
+- `wl(expr)` evaluates and resolves to the decoded result; a failure (`NotAllowed`, `Syntax`,
+  `TimeLimit`...) rejects with a `WolframError` that has `failure`, `symbols` and `reply`.
+  `wl.reply(expr)` resolves to the whole reply (`success`, `result`, `inputForm`, `messages`,
+  `timing`, `tex`, `image`, `format`). As a tagged template, ``wl`Solve[${p} == 0, x]` `` is
+  Wolfram Language text: the raw strings (so `\[Pi]` stays) with each value inserted as
+  `(InputForm)`: numbers as Wolfram numbers (`1.*^-7`), strings as Wolfram strings (control
+  characters as `\:0001`), expressions as their InputForm (a rule on the left of a rule in
+  parentheses: `(1 -> 2) -> 3`). A value that cannot be sent (a function, `NaN`) rejects.
+- `show(expr)` evaluates and shows the result in the run's entry exactly like the Wolfram mode
+  (KaTeX, a picture, kernel messages, the meta line) and resolves to the result. A result of the
+  same run that the code has not changed is shown from its reply without another evaluation (a
+  plot's `Graphics` could not be sent back: it holds options outside the allowlist); one changed
+  in place (`r.push(W.z)`) is evaluated as it is now.
+- `console.log`, `info`, `debug`, `warn`, `error` write lines (warnings and errors in red);
+  values are shown JSON-like (`2n`, `[Circular]`), Wolfram expressions as InputForm.
+- Also there: `sym`, `fn`, `real`, `toInputForm`, `WSymbol`, `WFunction`, `WReal`, `WBigReal`,
+  `WAssociation`, `WArray`, and `toJS(result)`: reals as numbers, `True`/`False`/`Null` as
+  `true`/`false`/`null`, associations as objects (a `Map` when a key is not a string), packed
+  arrays as nested arrays, lists element by element; other expressions unchanged.
+- The returned value: nothing for `undefined`; a Wolfram expression (or an array holding one), or
+  a result of the run, is shown like `show`, once (`return show(...)` does not show it twice);
+  anything else as text. A failure of `show` (also of a returned value the kernel refuses, such as
+  `return W.Grid(rows)`) is shown where the result would be, and not again as an uncaught error;
+  code that catches it gets the `WolframError` as usual. An uncaught exception is shown as an error line with the line of the
+  code when the browser's stack trace gives it.
+- There is no translation of JavaScript operators: `W.x * 2` is `NaN` and `W.x + 1` a string.
+  Write `W.Times(W.x, 2)`, or Wolfram Language text.
+
+Each run has a fresh module worker (`web/js-runner.js`), which the Stop button terminates: an
+endless loop never blocks the page, and only one run goes at a time. The worker loads its own
+WXF codec and sends WXF bytes; the page evaluates them on its socket and sends the reply bytes
+back, and shows a result when the worker names the request it came from. Not awaited calls are
+lost when the code returns: the worker ends with the run.
+
+- Stop does not interrupt the kernel: requests already sent finish there (their replies are
+  dropped), and a later run's requests wait behind them (its meta line says `waiting for n
+  evaluations of earlier runs`). At most 8 requests of all runs are in the kernel; a run's
+  requests that were not sent yet are dropped with it, so Run and Stop again cannot pile up work.
+- The worker runs in the page's process: code that uses up memory
+  (`for (;;) a.push(new Array(1e6))`) crashes the whole tab within seconds, with its entries and
+  drafts, and Stop cannot prevent that.
+- Code that bypasses the helpers and posts messages to the page itself (`self.postMessage`) has
+  its run ended when it sends too many or malformed ones (see Security).
+
+### Examples page
+
+`/examples.html` (with the same `?token=…`, and `?wasm=64` for that build; linked from the test
+page's header and after its JavaScript examples; the links between the two pages keep the query)
+has 14 short examples of the JavaScript mode in six sections: expressions built with `W` and with
+templates, a table from a loop, exact roots checked numerically, Newton's method with the
+kernel's `D`, matrices from arrays, plots built with `W`, data computed in JavaScript and drawn by
+the kernel (logistic map, Ulam spiral), big integers as `BigInt`, continued fractions, error
+handling, and a loop that only Stop ends. The code lives in `web/examples.js`.
+
+- Run shows the output under the example, exactly as the test page would (each run in a fresh
+  worker, with the same checks and limits: `web/page.js` holds that code for both pages). One run
+  at a time: the other Run buttons are disabled until it ends; running an example again replaces
+  its output.
+- Open in editor goes to `index.html?…#js=<code>`: the test page switches to JavaScript mode and
+  puts the code in its editor without running it, then removes the fragment (a fragment is never
+  sent to the server). A fragment that does not decode, or code longer than 20000 characters, is
+  not loaded and a notice says so. Code from a link is never run by itself.
 
 ### wasm32 or wasm64
 
@@ -242,6 +337,24 @@ Evaluating expressions from the network is running code on this machine, so:
   their results are pictures (see Protocol). `RandomReal` and `RandomInteger` are allowed for data.
   The check includes the keys of associations, which a WXF request can send as an atom whose keys
   `Cases` does not visit (`Normal` would evaluate them).
+- **Symbols made by requests**: reading a request creates the symbols it names that do not exist
+  yet. WXF reads a name without a context as a `System`` symbol (`sym('x')` is `System`x`, not
+  the variable `x`) and takes any name in any context, even ones typed input cannot form
+  (`a b`, `*`); typed input creates its symbols too (`System`foo`, `Foo`bar`). Left behind, a
+  new `System`x` would change every later request on that kernel: typed `x` would mean the
+  refused `System`x`, and `Global`x` would no longer decode. So the kernel collects the symbols
+  created while a request is read (`$NewSymbol`): a request that created one outside `Global``
+  is refused (`NotAllowed`, with the symbol in `Symbols`: a `System`` name the kernel does not
+  have is not a variable), and every symbol created by a request that is refused or cannot be
+  read is removed again, so the next request finds the kernel as it was. The new `Global``
+  variables of a request that is evaluated are removed once its reply has been sent, so that
+  distinct names do not pile up in the kernel's memory (which `MemoryConstrained` does not count);
+  a symbol that has been given anything (attributes, values, messages) in the meantime is never
+  removed. Reading stops at the 10001st new symbol of a request, which is then refused
+  (`NotAllowed`): this bounds the work done outside the time limit, also for cleaning up.
+  Context-less names are not reinterpreted as `Global``: that is not what WXF means, and keys of
+  a WXF association cannot be rewritten without evaluating them. `Global`` symbols cannot shadow
+  `System`` ones, which typed input finds first.
 - **Box syntax**: the front end reads linear box syntax (`\!\(...\)`, `\(...\)`, `\*`) in the
   strings it draws, such as labels and `Text`. A request with such a string is refused, whether
   typed, written with escapes (`\.5c!`, `\:005c`) or sent as WXF, and a result with one gets no
@@ -253,6 +366,21 @@ Evaluating expressions from the network is running code on this machine, so:
   leaves free. A kernel that still does not answer is killed with its process group (udocker,
   proot, kernel, front end) and replaced. The front end's memory is bounded only by the picture
   limits under Protocol.
+- **JavaScript mode**: the code runs in a module worker, without the DOM, the page, the socket or
+  the token: the page sends it only the code and the wasm module's URL (neither the worker's nor
+  the module's URL has the page's query), and the code's requests go through the allowlist like
+  any other. The page takes every message of the worker as untrusted: types and sizes are
+  checked, text is shown only as text, and the only results shown are replies that the page got
+  from the kernel for that run (the worker names them by request id; the page keeps the last 64,
+  up to 64 MiB beyond the newest 16), so TeX and pictures always come from the server, through
+  KaTeX with the options above or as `<img>`. A run shows at most 1000 console lines (then a
+  count of the dropped ones) and 50 results. Its requests are at most 8 MiB and 8 in flight (the
+  worker queues the others), and at most 8 requests of all runs are in the kernel at once (Stop
+  does not cancel those already sent). A run that sends a request beyond these limits, a
+  malformed one, or more than 5000 other messages at once or 2000 a second is ended. The page
+  terminates the worker on Stop and when the run ends, and drops its later messages and the
+  replies to its requests. The worker shares the page's process: code that exhausts memory
+  crashes the tab.
 - **Access**: the server listens on `127.0.0.1` by default, the WebSocket requires the token, and
   browsers may connect only from the server's own origin (plus `--allow-origin`). Put a TLS proxy
   in front before exposing it beyond localhost.
@@ -266,22 +394,47 @@ tests/run_codec_tests.sh       # kernel writes 62 reference WXF files: decode+re
                                # identical bytes; kernel reads files written by the codec (ASan/UBSan)
 # with a server running (WSBRIDGE_TOKEN=testtoken); each test takes another URL as its argument,
 # e.g. node tests/node_e2e.mjs 'ws://127.0.0.1:18100/ws?token=testtoken':
-node tests/node_e2e.mjs        # 300 checks, with wasm32 and wasm64: codec and kernel round trips, a 96 MiB
+node tests/node_e2e.mjs        # 366 checks, with wasm32 and wasm64: codec and kernel round trips, a 96 MiB
                                # value, refusals (also in association keys and of box syntax in strings),
                                # picture limits, ordering; both builds must encode to the same bytes;
                                # TeX of 44 varied results must render with the vendored KaTeX
                                # (throwOnError), Range[1500] within 5 s, plots must come back as SVG,
-                               # an Image as PNG
-.venv/bin/python tests/smoke_ws.py   # 18 requests, text and WXF; replies carry TeX or a picture
+                               # an Image as PNG; js-helpers.js (W, templates with control characters
+                               # and nested rules, toJS, value display, bounded InputForm) and
+                               # expressions built with W (a refused W.A leaves the variable A
+                               # working), evaluateWXF and toReply; the code of the examples page compiles
+.venv/bin/python tests/smoke_ws.py   # 38 requests, text and WXF; replies carry TeX or a picture;
+                                     # symbols that refused requests create are removed again
+                                     # (context-less, odd and empty names, a cut-short WXF, the
+                                     # 10000-symbol limit)
 node tests/screenshots.mjs     # the test page in headless Chromium ($CHROME or chromium-headless):
-                               # 12 evaluations with each build (30 checks): math typeset with KaTeX,
-                               # Plot, Plot3D and ContourPlot pictures loaded, KaTeX fonts served by
-                               # the bridge, nothing from other origins, no overflow at phone width
-                               # (also with a 200-digit message), labelled input and live regions;
-                               # screenshots (light, light-full, dark, phone) in build/screenshots/
+                               # 12 evaluations, 36 JavaScript runs and the 14 examples of the examples
+                               # page with each build (160 checks): math
+                               # typeset with KaTeX, Plot, Plot3D and ContourPlot pictures loaded, KaTeX
+                               # fonts served by the bridge, nothing from other origins, no overflow at
+                               # phone width (also with a 200-digit message), labelled input and live
+                               # regions; JavaScript mode: wl, show, return values, console lines and
+                               # their cap, errors with line numbers, refusals as rejections, templates,
+                               # results changed in place, the cap of shown results, no DOM or token
+                               # in the worker and its own wasm build, an endless loop stopped with the
+                               # page responsive and the worker gone, Stop during kernel work, floods
+                               # and malformed requests posted around the helpers (run ended, page
+                               # responsive), drafts and remembered mode, a refused returned value shown
+                               # once; examples page: every example run with its output checked (text,
+                               # KaTeX, pictures), one run at a time, Stop of the endless one, Copy, Open
+                               # in editor (code in the editor, not run; malformed and too long #js=
+                               # links refused), no overflow at phone width; screenshots (light,
+                               # light-full, dark, phone, js-light, js-dark, js-phone, examples-light,
+                               # examples-full, examples-dark, examples-phone, examples-phone-results)
+                               # in build/screenshots/
 # with a server started with --time-limit 1 --memory-limit 200000000 --format-time-limit 2:
-.venv/bin/python tests/limits_test.py   # limits then a working kernel, ten times; an export that runs
-                                        # out of time, then a Plot that comes with a picture (twice)
+.venv/bin/python tests/limits_test.py   # limits then a working kernel, ten times (the memory cases pass
+                                        # 200 MB in well under 0.1 s, before the time limit); an export
+                                        # that runs out of time, then a Plot that comes with a picture
+                                        # (twice; a Plot that runs out of format time on a loaded
+                                        # machine is asked again, up to three times); each reply
+                                        # may take 300 s, which covers a new kernel that does not
+                                        # start and is replaced by the bridge
 ```
 
 ## Not supported
