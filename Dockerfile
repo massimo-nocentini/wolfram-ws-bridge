@@ -5,7 +5,7 @@
 #     -v ~/.WolframEngine/Licensing:/home/wolframengine/.WolframEngine/Licensing wolfram-ws-bridge
 #
 # The image has no license: mount an activated Licensing folder (see README, "Docker").
-# Arguments after the image name go to server/bridge.py, e.g. --kernels 2 --time-limit 10.
+# Arguments after the image name go to server/bridge.py, e.g. --kernels 2.
 
 ARG WOLFRAM_ENGINE_IMAGE=wolframresearch/wolframengine:15.0
 FROM ${WOLFRAM_ENGINE_IMAGE}
@@ -21,9 +21,9 @@ COPY requirements.txt .
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 COPY server/ server/
-COPY kernel/WSBridge.wl kernel/allowlist.txt kernel/
+COPY kernel/WSBridge.wl kernel/
 COPY web/ web/
-# run/port-<port>/ holds the kernel configuration and logs
+# run/port-<port>/ holds the kernel logs
 RUN mkdir run && chown wolframengine:wolframengine run \
  && /opt/venv/bin/python server/bridge.py --help > /dev/null
 

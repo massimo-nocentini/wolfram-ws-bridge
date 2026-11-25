@@ -45,11 +45,9 @@ export class WolframSocket {
    * Resolves to { success, result, inputForm, messages, timing, tex, image, format } or
    * { success: false, failure, message, symbols }; `raw` holds the decoded reply and `bytes` its
    * WXF bytes (for passing the reply on, e.g. to a worker, which decodes it with toReply).
-   * result: undefined for a result larger than the kernel's $ResultLimit (inputForm is then
-   * '-LargeResult-'); tex: the result as TeX (for KaTeX), absent for pictures; image:
-   * { format: 'SVG', data: string } for graphics or { format: 'PNG', data: Uint8Array } for raster
-   * images (see imageURL); format: why neither came, when formatting ran out of time or memory
-   * ('TimeLimit', 'MemoryLimit' or 'Aborted').
+   * tex: the result as TeX (for KaTeX), absent for pictures and for results too large to typeset;
+   * image: { format: 'SVG', data: string } for graphics or { format: 'PNG', data: Uint8Array } for
+   * raster images (see imageURL); format: 'Aborted' when making them was aborted.
    */
   evaluate(input) {
     if (this.ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error('the connection is not open'))

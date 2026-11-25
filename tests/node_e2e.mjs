@@ -73,32 +73,47 @@ await expect(fn('Factor', fn('Plus', fn('Power', sym('Global`x'), 4), -1)), r =>
 for (let i = 0; i < 5; i++) await expect('1/0', r => r.success && r.messages.length === 1 && r.messages[0].startsWith('Power::infy'), `1/0 message still shown (${i + 1})`)
 await expect('Eigenvalues[{{2, 1}, {1, 2}}]', r => r.success && isDeepStrictEqual(r.result, [3, 1]))
 await expect('N[Pi, 30]', r => r.success && r.result instanceof WBigReal)
-await expect(fn('Run', 'id'), r => !r.success && r.failure === 'NotAllowed' && r.symbols.includes('System`Run'))
-await expect('ReadList["/etc/passwd"]', r => !r.success && r.failure === 'NotAllowed')
-await expect('Symbol["Ru" <> "n"]["id"]', r => !r.success && r.failure === 'NotAllowed')
-await expect(fn('Plus', 1, sym('Developer`ToPackedArray')), r => !r.success && r.failure === 'NotAllowed', 'symbols outside System`/Global` are refused')
-await expect('f[x_] := x', r => !r.success && r.failure === 'NotAllowed')
 await expect('Integrate[', r => !r.success && r.failure === 'Syntax')
-// symbols in the keys of a WXF association, which is an atom in the kernel; Normal would run them
-const runKey = new WAssociation([[fn('Run', 'id'), 1, false]])
-await expect(runKey, r => !r.success && r.failure === 'NotAllowed' && r.symbols.includes('System`Run'), 'Run in an association key is refused')
-await expect(fn('Normal', runKey), r => !r.success && r.failure === 'NotAllowed' && r.symbols.includes('System`Run'), 'Normal of an association with a Run key is refused')
-await expect(fn('Normal', new WAssociation([['a', new WAssociation([[fn('Run', 'id'), 2, false]]), false]])),
-  r => !r.success && r.failure === 'NotAllowed' && r.symbols.includes('System`Run'), 'Run in a key of an inner association is refused')
-// box syntax in strings, which the front end would read when it draws a label: as WXF, through
-// escapes in typed input, and in association keys
-const boxes = r => !r.success && r.failure === 'NotAllowed' && !r.image
-await expect(fn('Graphics', fn('Text', '\\!\\(x\\)')), boxes, 'WXF string with box syntax is refused')
-await expect('Graphics[Text["\\.5c!\\.5c(x\\.5c)"]]', boxes)
-await expect('Graphics[{}, PlotLabel -> "\\:005c(x\\:005c)"]', boxes)
-await expect(fn('Graphics', fn('Text', new WAssociation([['\\*RowBox[{}]', 1, false]]))), boxes, 'box syntax in an association key is refused')
-await expect('ToString[x^2, StandardForm]', r => !r.success && r.failure === 'NotAllowed')
-// the front end draws no graphics or text for Image during an evaluation, and no huge pictures
-await expect('Image[Graphics[Disk[]]]', r => r.success && !r.image && r.messages.length === 1 && r.messages[0].startsWith('Image::wsbimage'))
-await expect('Graphics[Disk[], ImageSize -> 10^5]', r => r.success && !r.image && r.inputForm === '-Graphics-')
-await expect('{Graphics[], Range[10^5]}', r => r.success && !r.image && r.tex === undefined)
-// a large result comes without the expression
-await expect('RandomReal[1, {1500, 1500}]', r => r.success && r.result === undefined && r.inputForm === '-LargeResult-')
+// any function may run: the system, files, strings as code, other contexts, box syntax
+await expect('Run["exit 3"]', r => r.success && [3, 768].includes(r.result))
+await expect(fn('StringQ', fn('ReadString', '/etc/hostname')), r => r.success && r.inputForm === 'True')
+await expect('ToExpression["2 + 3"]', r => r.success && r.result === 5)
+await expect(fn('Head', fn('Developer`ToPackedArray', [1, 2])), r => r.success && r.result.name === 'List')
+await expect(fn('Normal', new WAssociation([[fn('Plus', 1, 2), 1, false]])), r => r.success && isDeepStrictEqual(r.result, [fn('Rule', 3, 1)]), 'association keys are evaluated')
+await expect('Image[Graphics[Disk[]]]', r => r.success && r.image?.format === 'PNG' && r.messages.length === 0)
+await expect('Graphics[Disk[], ImageSize -> 2500]', r => r.success && r.image?.format === 'SVG')
+// definitions stay, also of functions whose argument names nothing else uses
+await expect('wsbA = 5', r => r.success && r.result === 5)
+await expect('wsbF[wsbArg_] := wsbArg^2 + wsbA', r => r.success)
+await expect('wsbF[3]', r => r.success && r.result === 14, 'a definition of an earlier request')
+await expect('wsbE = wsbU + 1', r => r.success)
+await expect('wsbE /. wsbU -> 2', r => r.success && r.result === 3, 'a variable inside a stored value is still the same symbol')
+await expect('wsbB = 2\nwsbC = wsbB + 1\n\nwsbC^2', r => r.success && r.result === 9, 'several lines: the last result')
+await expect('Clear[wsbA, wsbB, wsbC, wsbE, wsbF]; wsbA', r => r.success && r.inputForm === 'wsbA')
+await expect('(* nothing *)', r => r.success && r.inputForm === 'Null')
+// nothing escapes to the request loop
+for (const input of ['Break[]', 'Continue[]', 'Throw[1]', 'Throw[1, tag]', 'Return[7]', 'Sequence[1, 2]', 'Sequence[]', 'Nothing', 'Goto[x]']) {
+  await expect(input, r => r.success, `${input} gets a reply`)
+  await expect('1 + 1', r => r.success && r.result === 2, `... and the kernel goes on`)
+}
+await expect('Abort[]', r => !r.success && r.failure === 'Aborted')
+// no limits on the result: 20 MB of reals, 10^6 elements of text
+await expect('RandomReal[1, {1600, 1600}]', r => r.success && r.result instanceof WArray && r.result.data.length === 2560000, 'a 20 MB result comes whole')
+await expect('Range[10^6] + x', r => r.success && r.inputForm.length > 1e7 && r.inputForm.endsWith('1000000 + x}'), 'the InputForm text of 10^6 elements comes whole')
+await expect(fn('Total', Array.from({ length: 12000 }, (_, i) => sym(`Global\`wsbT${i}`))), r => r.success && r.result.args.length === 12000, 'a request with 12000 new symbols')
+await expect(fn('Length', new Uint8Array(40 * 1024 ** 2)), r => r.success && r.result === 40 * 1024 ** 2, 'a 40 MiB request')
+// Quit ends the kernel: it is replaced, without its definitions
+await expect('wsbQ = 1', r => r.success)
+await expect('Quit[]', r => !r.success && r.failure === 'KernelRestarted')
+await expect('wsbQ + 1', r => r.success && r.inputForm === '1 + wsbQ', 'a new kernel after Quit[]')
+// a client that leaves during an endless evaluation frees the kernel for the next one
+{
+  const leaving = await WolframSocket.open(url, wxf)
+  leaving.evaluate('While[True]').catch(() => {})
+  await new Promise(r => setTimeout(r, 1000))
+  leaving.close()
+  await expect('2 + 2', r => r.success && r.result === 4, 'an endless evaluation ends when its client leaves')
+}
 // 4. results for the page: TeX for math, which the vendored KaTeX must render without errors, and
 // without traces of TeXForm's own failures (InputForm text, \unicode, contexts, placeholders)
 const TEX = [
@@ -153,7 +168,7 @@ for (const [input, part] of TEX) {
   const r = await socket.evaluate(input)
   let error = ''
   if (r.success && typeof r.tex === 'string') {
-    try { katex.renderToString(r.tex, { displayMode: true, throwOnError: true, strict: 'ignore', trust: false, maxSize: 50, maxExpand: 1000 }) } catch (err) { error = err.message }
+    try { katex.renderToString(r.tex, { displayMode: true, throwOnError: true, strict: 'ignore', trust: false }) } catch (err) { error = err.message }
   }
   const clean = typeof r.tex === 'string' && !/\\unicode|\\grave|wsb-tex|`/.test(r.tex)
   const ok = r.success && clean && !error && r.tex.includes(part) && !r.image
@@ -206,12 +221,7 @@ await expect(W.Integrate(W.Power(W.x, 2), W.x), r => r.success && r.inputForm ==
 await expect(W.D(W.Sin(W.Times(2, W.x)), W.x), r => r.success && r.inputForm === '2*Cos[2*x]')
 await expect(W.f(W.x), r => r.success && r.inputForm === 'f[x]', 'W.f(W.x) is f[x], a Global` function without definitions')
 await expect('x + 1', r => r.success && r.inputForm === '1 + x', 'typed x is still Global`x after W.x was sent')
-await expect(W.Run('id'), r => !r.success && r.failure === 'NotAllowed' && r.symbols.includes('System`Run'), 'W.Run(...) is refused')
-// W.WsbJsA is System`WsbJsA, which does not exist: refused, and removed again by the kernel, so
-// that the variable of that name still works afterwards, sent with its context or typed
-await expect(W.Plus(W.WsbJsA, 1), r => !r.success && r.failure === 'NotAllowed' && isDeepStrictEqual(r.symbols, ['System`WsbJsA']), 'W.WsbJsA (a System` name that does not exist) is refused')
-await expect(W.Plus(W['Global`WsbJsA'], 1), r => r.success && r.inputForm === '1 + WsbJsA', "W['Global`WsbJsA'] works after W.WsbJsA was refused")
-await expect('WsbJsA + 2', r => r.success && r.inputForm === '2 + WsbJsA', 'typed WsbJsA is still the variable after W.WsbJsA was refused')
+await expect(W.StringLength('id'), r => r.success && r.result === 2)
 await expect(wlText`Solve[${W.Power(W.x, 2)} == ${4}, x]`, r => r.success && toInputForm(r.result) === '{{x -> -2}, {x -> 2}}')
 await expect(wlText`N[\[Pi], ${20}]`, r => r.success && r.result instanceof WBigReal && r.inputForm.startsWith('3.14159265358979323846'))
 await expect(wlText`{${'a"b\\'}, ${2.5}, ${-3}}`, r => r.success && isDeepStrictEqual(r.result, ['a"b\\', real(2.5), -3]))
@@ -262,7 +272,7 @@ prefix = 'js-helpers: '
     'InputForm puts a rule on the left of a rule, as a key or as a head, in parentheses')
   const escaped = toInputForm('a\u0001"\\\n\t\r\u007f\ud800😀')
   check(escaped === '"a\\:0001\\"\\\\\\n\\t\\r\\:007f\\:fffd😀"', 'InputForm of strings uses Wolfram escapes', escaped)
-  // with a limit, the text of a huge value stops early: no seconds spent on decimal digits or on
+  // with a limit (previews), the text of a huge value stops early: no seconds spent on decimal digits or on
   // writing a million elements
   const t0 = performance.now()
   const short = [toInputForm(10n ** 300000n, 300), toInputForm(Array(1e6).fill(real(1.5)), 300), toInputForm('q'.repeat(1e7), 300)]
@@ -287,8 +297,8 @@ prefix = 'js-helpers: '
   o.self = o
   check(formatValue('as is') === 'as is' && formatValue(o) === '{n: 1n, s: "x", list: {x, x -> 2}, f: [Function f], d: undefined, self: [Circular]}' &&
     formatValue([[fn('Rule', x, -2)]]) === '{{x -> -2}}' && formatValue(new Map([[1, [2n]]])) === 'Map(1) {1 => [2n]}' &&
-    formatValue(new Error('bad')) === 'Error: bad' && formatValue(Array(1e6).fill(7)).length < 1000 && formatValue('y'.repeat(20000)).length === 10001,
-    'formatValue: JSON-like, BigInt, cycles, functions, InputForm of expressions, bounded', formatValue(o))
+    formatValue(new Error('bad')) === 'Error: bad' && formatValue(Array(1e5).fill(7)).length === 3e5 && formatValue('y'.repeat(20000)).length === 20000 && formatValue('y'.repeat(20000), 300).length === 301,
+    'formatValue: JSON-like, BigInt, cycles, functions, InputForm of expressions, bounded only with a limit', formatValue(o))
 }
 
 // the examples of examples.html (web/examples.js): well formed; tests/screenshots.mjs runs them
@@ -299,7 +309,7 @@ prefix = 'examples: '
   const params = ['W', 'wl', 'show', 'sym', 'fn', 'real', 'toInputForm', 'toJS', 'WSymbol', 'WFunction', 'WReal', 'WBigReal', 'WAssociation', 'WArray']
   const bad = examples.filter(e => {
     try { new AsyncFunction(...params, e.code) } catch { return true }
-    return !/^[a-z0-9-]+$/.test(e.id) || !e.title || !e.text || e.code.split('\n').length > 20 || encodeURIComponent(e.code).length > 9 * 20000
+    return !/^[a-z0-9-]+$/.test(e.id) || !e.title || !e.text || e.code.split('\n').length > 20
   })
   check(examples.length >= 10 && examples.length <= 14 && new Set(examples.map(e => e.id)).size === examples.length && bad.length === 0 &&
     SECTIONS.every(s => s.title && s.text && s.examples.length), `${examples.length} examples in ${SECTIONS.length} sections: unique ids, ` +

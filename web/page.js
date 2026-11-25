@@ -1,6 +1,6 @@
 // What the test page (index.html) and the examples page (examples.html) share: the connection,
 // showing a reply (KaTeX, a picture or text, kernel messages, a meta line), and JavaScript runs in a
-// worker (js-runner.js) with every check of their messages. One run at a time per page.
+// worker (js-runner.js). One run at a time per page.
 import { WXF, toInputForm } from './wxf.js'
 import { WolframSocket, imageURL } from './wolfram-socket.js'
 
@@ -34,9 +34,8 @@ export const connected = () => !!socket && socket.ws.readyState === WebSocket.OP
 // ---- results ----
 
 // Server strings reach the page only as text, through KaTeX's rendering of TeX, or as an <img>.
-// KaTeX's limits are given explicitly: no \href or \url (trust), no huge \rule or \kern (maxSize,
-// in em), bounded macro expansion; \arraystretch spaces the rows of matrices of fractions.
-const KATEX = { displayMode: true, fleqn: true, throwOnError: false, strict: 'ignore', trust: false, maxSize: 50, maxExpand: 1000 }
+// trust: false: no \href or \url; \arraystretch spaces the rows of matrices of fractions.
+const KATEX = { displayMode: true, fleqn: true, throwOnError: false, strict: 'ignore', trust: false, maxExpand: Infinity }
 const pictureURLs = new WeakMap()   // owner element -> object URLs of its pictures, released with it
 
 export const line = (parent, cls, text) => {
@@ -54,12 +53,11 @@ export function releasePictures(owner) {
 }
 
 // What renderReply needs of a reply, without its decoded result: a JavaScript run keeps these for
-// show(). The "decoded:" text is bounded, since the InputForm of a huge result takes seconds.
+// show(). The "decoded:" text is only a preview; the full InputForm is shown above it.
 export function displayOf(reply) {
   if (!reply.success) return { success: false, failure: reply.failure, message: reply.message, symbols: reply.symbols }
   let detail
   if (reply.image) detail = `${reply.image.format} picture, ${(reply.image.data.length / 1024).toFixed(1)} KB`
-  else if (reply.result === undefined) detail = 'result too large to send'
   else {
     try { detail = `decoded: ${toInputForm(reply.result, 300)}` } catch { detail = 'decoded: (too deeply nested to show)' }
   }
@@ -109,20 +107,11 @@ export function renderReply(box, owner, reply, label, before = [], after = []) {
 
 // ---- JavaScript runs ----
 // The code runs in a fresh module worker (js-runner.js), which gets only the code and the URL of
-// the wasm module, never the token or the socket. Its messages are untrusted: each is checked and
-// bounded per run, text is shown only as text, and only replies that the page itself got from the
-// kernel for the run are shown (the worker names them by id), so TeX and pictures always come
-// from the server.
+// the wasm module. Its messages are checked for their types only, text is shown only as text, and
+// only replies that the page itself got from the kernel for the run are shown (the worker names
+// them by id). There are no limits on what a run prints, shows or sends.
 
-const MAX_LINES = 1000                // console lines shown per run, then a count of the dropped ones
-const MAX_SHOWN = 50                  // results shown per run (show() and the returned value)
-const MAX_PENDING = 8                 // kernel requests in flight: per run, and of all runs together
-const MAX_REQUEST = 8 * 1024 ** 2     // bytes of one request (the server's default --max-message; as in js-runner.js)
-const KEEP = 64, KEEP_BYTES = 64 * 1024 ** 2, KEEP_NEWEST = 16   // replies of a run kept for show()
-// messages from a run: a burst, then a rate; code that floods the page (self.postMessage in a
-// loop) has its run ended. A long text costs more.
-const BURST = 5000, RATE = 2000       // messages, messages per second
-const clip = (text, max = 10000) => text.length > max ? `${text.slice(0, max)}…` : text
+const IN_KERNEL = 8                   // requests of all runs sent to the server at once: the others wait their turn here
 let inKernel = 0                      // run requests not answered yet, of all runs: Stop does not cancel them
 let current = null                    // the run in progress
 
@@ -140,9 +129,8 @@ export function startRun(code, { owner, output, meta, ended = () => {} }) {
   output.setAttribute('aria-live', 'off')   // screen readers get the meta line at the end, not every console line
   meta.textContent = 'Running…'
   const worker = new Worker(new URL('./js-runner.js', import.meta.url), { type: 'module' })
-  const run = { worker, owner, output, meta, ended, start: performance.now(), evaluations: 0, kernel: 0, pending: 0, sent: 0, held: [],
-                replies: new Map(), keptBytes: 0, budget: BURST, refilled: performance.now(),
-                lines: 0, dropped: 0, reported: 0, droppedLine: null, shown: 0, finished: new Set() }
+  const run = { worker, owner, output, meta, ended, start: performance.now(), evaluations: 0, kernel: 0, sent: 0, held: [],
+                replies: new Map(), finished: new Set() }
   current = run
   worker.onmessage = e => receive(run, e.data)
   worker.onerror = e => {
@@ -160,34 +148,18 @@ export function stopRun() {
   if (current) finish(current, 'stopped')
 }
 
-// a message's cost against the run's budget: false once the run has sent too much too fast
-function spend(run, cost) {
-  const now = performance.now()
-  run.budget = Math.min(BURST, run.budget + (now - run.refilled) * RATE / 1000)
-  run.refilled = now
-  return (run.budget -= cost) >= 0
-}
-
 function receive(run, m) {
   if (current !== run || m === null || typeof m !== 'object' || typeof m.type !== 'string') return
-  const text = typeof m.text === 'string' ? m.text : typeof m.label === 'string' ? m.label : ''
-  // requests are bounded by MAX_PENDING instead: the kernel sets their pace
-  if (m.type !== 'eval' && !spend(run, 1 + Math.floor(text.length / 10000))) {
-    return abort(run, `The run sent more than ${BURST} messages at once, or more than ${RATE} a second, to the page: ended.`)
-  }
   switch (m.type) {
     case 'eval': return evaluateFor(run, m)
     case 'render': return renderFor(run, m)
     case 'console':
-      if (typeof m.text === 'string') consoleLine(run, m.level === 'warn' || m.level === 'error' ? 'msg' : 'out', m.text)
-      return
-    case 'dropped':
-      if (Number.isSafeInteger(m.count) && m.count > run.reported) { run.reported = m.count; showDropped(run) }
+      if (typeof m.text === 'string') line(run.output, m.level === 'warn' || m.level === 'error' ? 'msg' : 'out', m.text)
       return
     case 'result': case 'error':   // once each, at the end of the run
       if (typeof m.text !== 'string' || run.finished.has(m.type)) return
       run.finished.add(m.type)
-      line(run.output, m.type === 'error' ? 'out err' : 'out result', clip(m.text))
+      line(run.output, m.type === 'error' ? 'out err' : 'out result', m.text)
       return
     case 'done': return finish(run, 'done')
   }
@@ -195,44 +167,27 @@ function receive(run, m) {
 
 const abort = (run, reason) => { line(run.output, 'out err', reason); finish(run, 'failed') }
 
-function consoleLine(run, cls, text) {
-  if (run.lines >= MAX_LINES) { run.dropped++; return showDropped(run) }
-  run.lines++
-  line(run.output, cls, clip(text))
-}
-
-function showDropped(run) {
-  run.droppedLine ??= line(run.output, 'meta', '')
-  const n = run.dropped + run.reported
-  run.droppedLine.textContent = `… ${n} more line${n === 1 ? '' : 's'} dropped`
-}
-
 // the socket answers in order, also after a run has ended: those answers are dropped here
 const answer = (run, message, transfer = []) => { if (current === run) run.worker.postMessage(message, transfer) }
 
-// js-runner.js never sends a request that breaks these rules (it checks the size itself and
-// queues requests beyond MAX_PENDING): code that bypasses it has its run ended
 function evaluateFor(run, { id, bytes }) {
   if (!Number.isSafeInteger(id) || !(bytes instanceof Uint8Array)) return abort(run, 'The run sent a malformed request: ended.')
-  if (bytes.length > MAX_REQUEST) return abort(run, `The run sent a request of more than ${MAX_REQUEST} bytes: ended.`)
-  if (run.pending >= MAX_PENDING) return abort(run, `The run sent more than ${MAX_PENDING} requests at once: ended.`)
-  run.pending++
   run.held.push({ id, bytes })
   sendHeld(run)
 }
 
-// Sends a run's requests while fewer than MAX_PENDING of all runs are in the kernel: those of a
+// Sends a run's requests while fewer than IN_KERNEL of all runs are in the kernel: those of a
 // stopped run still are, and wait their turn there; a run's requests that were not sent yet are
 // dropped with it, so repeated Run and Stop cannot pile up work in the kernel.
 function sendHeld(run) {
-  while (current === run && run.held.length && inKernel < MAX_PENDING) {
+  while (current === run && run.held.length && inKernel < IN_KERNEL) {
     const { id, bytes } = run.held.shift()
     inKernel++
     run.sent++
     run.evaluations++
     socket.evaluateWXF(bytes).then(reply => {
       if (Number.isFinite(reply.timing)) run.kernel += reply.timing
-      if (current === run) keep(run, id, displayOf(reply))
+      if (current === run) run.replies.set(id, displayOf(reply))
       done(run)
       answer(run, { type: 'reply', id, bytes: reply.bytes }, [reply.bytes.buffer])
     }, err => {
@@ -250,38 +205,18 @@ function sendHeld(run) {
 function done(run) {
   inKernel--
   run.sent--
-  run.pending--
   if (current) sendHeld(current)
-}
-
-// the displays of a run's replies, newest last: at most KEEP, and KEEP_BYTES beyond the newest ones
-function keep(run, id, display) {
-  const size = display.success
-    ? (display.image?.data.length || 0) + (display.tex?.length || 0) + display.inputForm.length + display.messages.join('').length : 0
-  run.replies.delete(id)
-  run.replies.set(id, { display, size })
-  run.keptBytes += size
-  for (const [old, { size }] of run.replies) {
-    if (run.replies.size <= KEEP && (run.keptBytes <= KEEP_BYTES || run.replies.size <= KEEP_NEWEST)) break
-    run.replies.delete(old)
-    run.keptBytes -= size
-  }
 }
 
 function renderFor(run, { id, of, label }) {
   if (!Number.isSafeInteger(id)) return
-  const kept = run.replies.get(of)
-  answer(run, { type: 'rendered', id, ok: !!kept })
-  if (!kept) return
-  if (run.shown >= MAX_SHOWN) {
-    if (run.shown++ === MAX_SHOWN) line(run.output, 'meta', `… further results not shown (at most ${MAX_SHOWN} in a run)`)
-    return
-  }
-  run.shown++
+  const display = run.replies.get(of)
+  answer(run, { type: 'rendered', id, ok: !!display })
+  if (!display) return
   const box = document.createElement('div')
   box.className = 'shown'
   run.output.append(box)
-  renderReply(box, run.owner, kept.display, typeof label === 'string' ? clip(label, 300) : 'result')
+  renderReply(box, run.owner, display, typeof label === 'string' ? label : 'result')
 }
 
 function finish(run, state) {
@@ -303,19 +238,11 @@ function finish(run, state) {
 // The examples page opens code in the test page's JavaScript mode with index.html#js=<code>: the
 // fragment is never sent to the server, and the code is only put in the editor, never run.
 
-export const MAX_LINK_CODE = 20000   // characters of code taken from a link
-
 /** A link to the test page (with this page's query: token, wasm) that opens code in its JavaScript mode */
 export const editorLink = code => `index.html${location.search}#js=${encodeURIComponent(code)}`
 
-/** The code of a #js=... fragment: { code }, { error } for a malformed or too long one, null for none */
+/** The code of a #js=... fragment: { code }, { error } for a malformed one, null for none */
 export function codeOfFragment(hash) {
   if (!hash.startsWith('#js=')) return null
-  const encoded = hash.slice(4)
-  // a character takes at most 9 characters encoded (%XX%XX%XX); longer ones are not decoded at all
-  if (encoded.length > 9 * MAX_LINK_CODE) return { error: `The code in the link is too long (at most ${MAX_LINK_CODE} characters): not loaded.` }
-  let code
-  try { code = decodeURIComponent(encoded) } catch { return { error: 'The code in the link is malformed: not loaded.' } }
-  if (code.length > MAX_LINK_CODE) return { error: `The code in the link is too long (${code.length} characters, at most ${MAX_LINK_CODE}): not loaded.` }
-  return { code }
+  try { return { code: decodeURIComponent(hash.slice(4)) } } catch { return { error: 'The code in the link is malformed: not loaded.' } }
 }

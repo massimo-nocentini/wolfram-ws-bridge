@@ -1,6 +1,6 @@
 // Runs the code of the test page's JavaScript mode (and of the examples page) in a module worker. The page starts a fresh
 // worker for each run and terminates it on Stop or when the run ends, so an endless loop cannot
-// hang the page. The code reaches neither the DOM, the page, the access token nor the socket: it
+// hang the page. The code has no DOM, page or socket of its own: it
 // sends WXF bytes for the page to evaluate and decodes the reply bytes itself. The page shows only
 // replies that it got from the kernel itself, named by the id of their request.
 //
@@ -9,7 +9,7 @@
 //                 { type: 'rendered', id, ok }     ok: false if the page no longer keeps that reply
 // worker -> page: { type: 'eval', id, bytes }       WXF of an expression to evaluate
 //                 { type: 'render', id, of, label } show the reply to request `of` like a Wolfram-mode result
-//                 { type: 'console', level, text }  { type: 'dropped', count } (console lines not sent)
+//                 { type: 'console', level, text }
 //                 { type: 'result', text }          { type: 'error', text }          { type: 'done' }
 import { WXF } from './wxf.js'
 import { toReply } from './wolfram-socket.js'
@@ -18,9 +18,7 @@ import {
   toInputForm, toJS,
 } from './js-helpers.js'
 
-const MAX_IN_FLIGHT = 8   // requests sent to the page at once (it ends a run that sends more); the others wait here
-const MAX_LINES = 1000    // console lines sent to the page; further ones are only counted
-const MAX_REQUEST = 8 * 1024 ** 2   // bytes of a request (the page ends a run that sends a larger one)
+const IN_FLIGHT = 8   // requests sent to the page at once; the others wait here, so that Stop drops them
 const post = (message, transfer) => self.postMessage(message, transfer || [])
 
 let wxf
@@ -30,7 +28,7 @@ const rendering = new Map()        // id -> resolve of render requests
 const queue = []                   // requests waiting for a free slot
 // results (objects) of this run -> { id of their request, their WXF when they came, shown }: a
 // result is shown from its reply only while it is unchanged (JS code can change arrays in place),
-// since evaluating it again may be refused (a plot's Graphics holds options outside the allowlist)
+// which saves evaluating it again
 const kept = new WeakMap()
 
 class WolframError extends Error {
@@ -44,7 +42,7 @@ class WolframError extends Error {
 }
 
 function pump() {
-  while (waiting.size < MAX_IN_FLIGHT && queue.length) {
+  while (waiting.size < IN_FLIGHT && queue.length) {
     const request = queue.shift()
     const id = nextId++
     waiting.set(id, request)
@@ -72,7 +70,6 @@ function receive({ id, bytes, error }) {
 
 /** Sends WXF bytes; resolves to { reply, id } */
 const send = bytes => new Promise((resolve, reject) => {
-  if (bytes.length > MAX_REQUEST) throw new RangeError(`a request must be at most ${MAX_REQUEST} bytes of WXF, not ${bytes.length}`)
   queue.push({ bytes, resolve, reject })
   pump()
 })
@@ -123,7 +120,6 @@ async function show(...args) {
   }
   const { reply, id } = await send(bytes)
   const rendered = await render(id, expr)
-  if (!rendered) say('warn', ['show: the page no longer keeps this reply (too many large results at once)'])
   // a failure that the page shows already is not shown again if the code does not catch it
   if (!reply.success) throw Object.assign(failed(reply, site), { shown: rendered })
   const shown = kept.get(reply.result)
@@ -131,16 +127,7 @@ async function show(...args) {
   return reply.result
 }
 
-let lines = 0, dropped = 0, droppedAt = 0
-function say(level, args) {
-  if (lines < MAX_LINES) {
-    lines++
-    return post({ type: 'console', level, text: args.map(a => formatValue(a)).join(' ').slice(0, 10000) })
-  }
-  dropped++
-  // the count of dropped lines, at most five times a second
-  if (Date.now() - droppedAt > 200) { droppedAt = Date.now(); post({ type: 'dropped', count: dropped }) }
-}
+const say = (level, args) => post({ type: 'console', level, text: args.map(a => formatValue(a)).join(' ') })
 for (const level of ['log', 'info', 'debug', 'warn', 'error']) console[level] = (...args) => say(level, args)
 
 const describe = err => {
@@ -183,6 +170,5 @@ self.onmessage = async ({ data }) => {
   } catch (err) {
     if (err?.shown !== true) post({ type: 'error', text: describe(err) })
   }
-  if (dropped) post({ type: 'dropped', count: dropped })
   post({ type: 'done' })
 }

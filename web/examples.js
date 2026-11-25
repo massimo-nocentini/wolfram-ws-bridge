@@ -100,7 +100,7 @@ console.log('condition number', Math.round(Math.max(...ev) / Math.min(...ev)))`,
   },
   {
     title: 'Plots built with W',
-    text: 'Plotting functions are allowlisted, and their results come back as pictures. JavaScript builds the list of curves or the options.',
+    text: 'The results of plotting functions come back as pictures. JavaScript builds the list of curves or the options.',
     examples: [
       {
         id: 'bessel',
@@ -209,14 +209,14 @@ return W.ListLogPlot(errors, W.Rule(W.PlotStyle, W.PointSize(W.Large)))`,
   },
   {
     title: 'Errors and Stop',
-    text: 'What the kernel refuses reaches the code as a rejection; code that never ends is stopped from the page.',
+    text: 'A failure in the kernel reaches the code as a rejection; code that never ends is stopped from the page.',
     examples: [
       {
         id: 'errors',
-        title: 'Refusals, syntax errors and messages',
-        text: 'Functions outside the allowlist and text that does not parse reject with a WolframError, which try/catch handles like any other error. ' +
+        title: 'Syntax errors, aborts and messages',
+        text: 'Text that does not parse and an evaluation that is aborted reject with a WolframError, which try/catch handles like any other error. ' +
           'Kernel messages come with a successful reply.',
-        code: `for (const input of ['Run["ls"]', 'Integrate[x^2, x', 'Import["/etc/passwd"]']) {
+        code: `for (const input of ['Integrate[x^2, x', 'Abort[]']) {
   try {
     await wl(input)
   } catch (err) {

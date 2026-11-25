@@ -52,7 +52,7 @@ COPY requirements.txt .
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 COPY server/ server/
-COPY kernel/WSBridge.wl kernel/allowlist.txt kernel/
+COPY kernel/WSBridge.wl kernel/
 COPY web/ web/
 RUN mkdir run && chown wolframengine:wolframengine run \
  && /opt/venv/bin/python server/bridge.py --help > /dev/null

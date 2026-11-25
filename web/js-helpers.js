@@ -20,11 +20,11 @@ export function callableSymbol(name) {
   return symbol
 }
 
-// WXF reads a symbol name without a context as a System` symbol, and the kernel refuses a System`
-// symbol it does not have (it is not a variable). So a name that starts with a capital letter or $
+// WXF reads a symbol name without a context as a System` symbol, and the kernel makes one that it
+// does not have. So a name that starts with a capital letter or $
 // (Sin, Pi, C, $MachinePrecision) stays a System` name, and any other name (x, f, myVar) is a
-// variable in Global`. A capitalized name that is not a System` symbol (W.A) is refused
-// (NotAllowed, System`A), with no effect on later requests: write such a variable as W['Global`A'].
+// variable in Global`. For a capitalized variable write W['Global`A']: W.A is System`A, which is
+// another symbol than the A typed before, and the one that A typed afterwards means.
 export const qualifiedName = name => name.includes('`') || /^[A-Z$]/.test(name) ? name : `Global\`${name}`
 
 /**
@@ -90,19 +90,18 @@ export function toJS(e) {
 
 const FULL = Symbol('full')
 
-// a small list that InputForm shows completely: expressions, numbers, strings, booleans, null,
-// lists of them; at most 10000 elements in all, counted as a tree, 100 levels deep (so cycles and
-// shared sublists that would make the text huge are not plain)
-const plainList = (v, budget = { n: 10000 }, depth = 0) => depth < 100 && v.every(item => --budget.n > 0 && (item === null ||
+// a list that InputForm shows completely: expressions, numbers, strings, booleans, null, lists of
+// them, 100 levels deep (so a cycle is not plain)
+const plainList = (v, depth = 0) => depth < 100 && v.every(item => item === null ||
   ['number', 'bigint', 'string', 'boolean'].includes(typeof item) || WOLFRAM_TYPES.some(T => item instanceof T) ||
-  (Array.isArray(item) && plainList(item, budget, depth + 1))))
+  (Array.isArray(item) && plainList(item, depth + 1)))
 
 /**
  * Display text of any value, like console.log: strings as they are, Wolfram expressions as
- * InputForm, everything else JSON-like (BigInt as 5n, [Circular], [Function f]). Never throws;
- * at most `limit` characters.
+ * InputForm, everything else JSON-like (BigInt as 5n, [Circular], [Function f]; objects more than 5 levels
+ * deep as {…}). Never throws; with a limit, at most that many characters.
  */
-export function formatValue(value, limit = 10000) {
+export function formatValue(value, limit = Infinity) {
   if (typeof value === 'string') return value.length > limit ? `${value.slice(0, limit)}…` : value
   const parts = []
   let length = 0
@@ -126,22 +125,19 @@ export function formatValue(value, limit = 10000) {
     if (v instanceof Error) return put(`${v.name}: ${v.message}`)
     if (v instanceof Date) return put(Number.isNaN(v.getTime()) ? 'Invalid Date' : v.toISOString())
     const typed = ArrayBuffer.isView(v) && !(v instanceof DataView)
-    if (depth > 5) return put(Array.isArray(v) || typed ? '[…]' : '{…}')
+    if (depth > 5 && !Array.isArray(v) && !typed) return put('{…}')
     ancestors.add(v)
     try {
       if (Array.isArray(v) || typed) {
         put(typed ? `${v.constructor.name}(${v.length}) [` : '[')
-        const n = Math.min(v.length, 100)
-        for (let i = 0; i < n; i++) { if (i) put(', '); write(v[i], depth + 1) }
-        if (v.length > n) put(`, … ${v.length - n} more`)
+        for (let i = 0; i < v.length; i++) { if (i) put(', '); write(v[i], depth + 1) }
         return put(']')
       }
       if (v instanceof Map || v instanceof Set) {
         put(`${v instanceof Map ? 'Map' : 'Set'}(${v.size}) {`)
         let i = 0
         for (const item of v) {
-          if (i) put(', ')
-          if (++i > 100) { put(`… ${v.size - 100} more`); break }
+          if (i++) put(', ')
           if (v instanceof Map) { write(item[0], depth + 1); put(' => '); write(item[1], depth + 1) } else write(item, depth + 1)
         }
         return put('}')
@@ -149,7 +145,7 @@ export function formatValue(value, limit = 10000) {
       const name = Object.getPrototypeOf(v)?.constructor?.name
       put(name && name !== 'Object' ? `${name} {` : '{')
       const keys = Object.keys(v)
-      keys.slice(0, 100).forEach((k, i) => {
+      keys.forEach((k, i) => {
         if (i) put(', ')
         put(/^[A-Za-z_$][\w$]*$/.test(k) ? k : JSON.stringify(k))
         put(': ')
@@ -157,7 +153,6 @@ export function formatValue(value, limit = 10000) {
         try { item = v[k] } catch { item = '[getter threw]' }
         write(item, depth + 1)
       })
-      if (keys.length > 100) put(`, … ${keys.length - 100} more`)
       return put('}')
     } finally {
       ancestors.delete(v)

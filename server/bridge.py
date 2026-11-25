@@ -7,8 +7,9 @@ result) or "Failure"/"Message". Replies on one
 connection come in request order. The same port serves the files in web/ over plain HTTP.
 
 Kernels run kernel/WSBridge.wl's Serve loop and talk to this process over a local ZMQ PAIR
-socket each. A kernel that does not answer in time is killed with its whole process group
-and replaced. A kernel that sends "restart" before a reply exits after it and is replaced too.
+socket each. Evaluations have no time limit: a kernel is killed, with its whole process group, and
+replaced when the client that waits for it disconnects (reload the page to abort). A kernel that
+exits (Quit[], a crash), or that sends "restart" before a reply, is replaced too.
 """
 
 import argparse
@@ -69,6 +70,10 @@ def wxf_failure(kind, message):
 
 # ---- kernels ----
 
+class KernelExited(Exception):
+    pass
+
+
 class Kernel:
     """One kernel process running WSBridge`Serve, connected through a ZMQ PAIR socket."""
 
@@ -118,12 +123,26 @@ class Kernel:
         log.info("%s ready (pid %d)", self.name, self.proc.pid)
         return self
 
-    async def evaluate(self, request, timeout):
+    async def _recv(self):
+        """The next message of the kernel; raises KernelExited if its process ends instead."""
+        received = asyncio.ensure_future(self.socket.recv())
+        exited = asyncio.ensure_future(self.proc.wait())
+        try:
+            await asyncio.wait({received, exited}, return_when=asyncio.FIRST_COMPLETED)
+            if not received.done():   # a reply sent just before the exit may still be on its way
+                await asyncio.wait({received}, timeout=1)
+            if not received.done():
+                raise KernelExited("exit code %s" % self.proc.returncode)
+            return received.result()
+        finally:
+            received.cancel(), exited.cancel()
+
+    async def evaluate(self, request):
         await self.socket.send(request)
-        reply = await asyncio.wait_for(self.socket.recv(), timeout)
+        reply = await self._recv()
         if reply == b"restart":   # this kernel can no longer make pictures and exits after the reply
             self.exiting = True
-            reply = await asyncio.wait_for(self.socket.recv(), timeout)
+            reply = await self._recv()
         return reply
 
     async def exited(self, timeout):
@@ -148,6 +167,7 @@ class KernelPool:
         self.start_timeout = start_timeout
         self.idle = asyncio.Queue()
         self.kernels = set()
+        self.closing = False
 
     async def _new(self):
         kernel = Kernel(self.command, self.initfiles, self.run_dir)
@@ -169,7 +189,7 @@ class KernelPool:
         else:
             kernel.kill()
         self.kernels.discard(kernel)
-        while True:
+        while not self.closing:
             try:
                 self.idle.put_nowait(await self._new())
                 return
@@ -177,16 +197,17 @@ class KernelPool:
                 log.exception("restarting a kernel failed; retrying in 10 s")
                 await asyncio.sleep(10)
 
-    async def evaluate(self, request, timeout):
+    async def evaluate(self, request):
         kernel = await self.idle.get()
         try:
-            reply = await kernel.evaluate(request, timeout)
+            reply = await kernel.evaluate(request)
         except BaseException as exc:
-            log.warning("%s did not answer (%s); replacing it", kernel.name, type(exc).__name__)
+            what = "the client left" if isinstance(exc, asyncio.CancelledError) else "%s: %s" % (type(exc).__name__, exc)
+            log.warning("%s did not answer (%s); replacing it", kernel.name, what)
             asyncio.ensure_future(self._replace(kernel))
-            if isinstance(exc, asyncio.CancelledError):
+            if not isinstance(exc, Exception):
                 raise
-            return wxf_failure("KernelRestarted", "The kernel did not answer in time and was restarted.")
+            return wxf_failure("KernelRestarted", "The kernel exited and is being replaced; its definitions are lost.")
         if kernel.exiting:
             log.info("%s asked to be replaced", kernel.name)
             asyncio.ensure_future(self._replace(kernel))
@@ -195,6 +216,7 @@ class KernelPool:
         return reply
 
     def close(self):
+        self.closing = True
         for kernel in list(self.kernels):
             kernel.kill()
         self.kernels.clear()
@@ -203,9 +225,8 @@ class KernelPool:
 # ---- WebSocket and HTTP ----
 
 class Bridge:
-    def __init__(self, pool, token, origins, request_timeout, max_reply):
-        self.pool, self.token, self.origins, self.request_timeout = pool, token, origins, request_timeout
-        self.max_reply = max_reply
+    def __init__(self, pool, token, origins):
+        self.pool, self.token, self.origins = pool, token, origins
 
     def process_request(self, connection, request):
         path, _, query = request.path.partition("?")
@@ -240,17 +261,20 @@ class Bridge:
             request = wxf_string(request)
         if not request.startswith(b"8:"):
             return wxf_failure("Decode", "Only uncompressed WXF (header 8:) is accepted.")
-        reply = await self.pool.evaluate(request, self.request_timeout)
-        if len(reply) > self.max_reply:
-            log.warning("reply of %d bytes not sent (--max-reply %d)", len(reply), self.max_reply)
-            return wxf_failure("ReplyTooLarge", "The reply has %d bytes, more than the server's limit of %d."
-                               % (len(reply), self.max_reply))
-        return reply
+        return await self.pool.evaluate(request)
 
     async def handler(self, ws):
         log.info("connection from %s", ws.remote_address)
+        closed = asyncio.ensure_future(ws.wait_closed())
         async for message in ws:
-            await ws.send(await self.evaluate(message))
+            reply = asyncio.ensure_future(self.evaluate(message))
+            try:
+                await asyncio.wait({reply, closed}, return_when=asyncio.FIRST_COMPLETED)
+                if not reply.done():   # the client left: nobody waits for this evaluation
+                    return
+            finally:
+                reply.cancel()
+            await ws.send(reply.result())
 
 
 async def main():
@@ -260,15 +284,6 @@ async def main():
     p.add_argument("--kernels", type=int, default=1, help="number of kernels (check your license's limit)")
     p.add_argument("--kernel", default=str(ROOT / "kernel" / "wolframkernel-udocker"),
                    help="kernel executable (default: the udocker wrapper)")
-    p.add_argument("--time-limit", type=float, default=30, help="seconds per evaluation")
-    p.add_argument("--memory-limit", type=int, default=2 * 1024**3, help="bytes per evaluation")
-    p.add_argument("--format-time-limit", type=float, default=20,
-                   help="seconds for the TeX or picture of a result, after the evaluation (default 20)")
-    p.add_argument("--request-timeout", type=float,
-                   help="seconds to wait for a kernel before replacing it (default: time limit + format time limit + 15)")
-    p.add_argument("--max-message", type=int, default=8 * 1024**2, help="largest request in bytes")
-    p.add_argument("--max-reply", type=int, default=64 * 1024**2,
-                   help="largest reply in bytes; a larger one is replaced by a ReplyTooLarge failure")
     p.add_argument("--allow-origin", action="append", default=[], help="extra allowed page origin")
     args = p.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
@@ -277,15 +292,11 @@ async def main():
     token = os.environ.get("WSBRIDGE_TOKEN") or secrets.token_urlsafe(24)
     origins = {f"http://{h}:{args.port}" for h in ("127.0.0.1", "localhost", args.host)} | set(args.allow_origin)
 
-    # one directory per port: servers started from the same checkout must not share the limits
-    # their kernels load, or overwrite each other's kernel logs
+    # one directory per port: servers started from the same checkout must not overwrite each
+    # other's kernel logs
     run_dir = ROOT / "run" / ("port-%d" % args.port)
     run_dir.mkdir(parents=True, exist_ok=True)
-    config = run_dir / "config.wl"
-    config.write_text(
-        f"WSBridge`$TimeLimit = {args.time_limit!r};\nWSBridge`$MemoryLimit = {args.memory_limit};\n"
-        f"WSBridge`$FormatTimeLimit = {args.format_time_limit!r};\n")
-    initfiles = [str(ROOT / "kernel" / "WSBridge.wl"), str(config)]
+    initfiles = [str(ROOT / "kernel" / "WSBridge.wl")]
 
     pool = KernelPool(args.kernels, args.kernel, initfiles, run_dir)
     stop = asyncio.get_running_loop().create_future()
@@ -294,16 +305,14 @@ async def main():
     try:
         log.info("starting %d kernel(s) with %s", args.kernels, args.kernel)
         await pool.start()
-        # a healthy kernel answers within its time limits for the evaluation and for the TeX or
-        # picture of the result; the extra 15 s cover serialization
-        bridge = Bridge(pool, token, origins,
-                        args.request_timeout or args.time_limit + args.format_time_limit + 15, args.max_reply)
+        bridge = Bridge(pool, token, origins)
         async with serve(bridge.handler, args.host, args.port, process_request=bridge.process_request,
-                         max_size=args.max_message):
+                         max_size=None, ping_timeout=None):   # any message size, however long it takes to transfer
             shown = "127.0.0.1" if args.host in ("0.0.0.0", "::", "") else args.host   # all interfaces (Docker)
             log.info("ready: open http://%s:%d/?token=%s  (WebSocket endpoint /ws?token=...)",
                      shown, args.port, token)
             await stop
+            pool.closing = True
     finally:
         pool.close()
         log.info("stopped")

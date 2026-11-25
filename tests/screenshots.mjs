@@ -2,8 +2,7 @@
 // inputs through the page, checks the displayed results (math typeset with KaTeX, plots as loaded
 // pictures) and that nothing overflows at phone width,
 // and saves screenshots (light, light-full, dark, phone) to build/screenshots/; then runs JavaScript-mode
-// code (results, pictures, console lines, errors, refusals, Stop, the worker's isolation, messages
-// posted around the helpers) and saves screenshots of that mode (js-light, js-dark, js-phone). The examples page
+// code (results, pictures, console lines, errors, Stop, the worker) and saves screenshots of that mode (js-light, js-dark, js-phone). The examples page
 // (examples.html): every example run with its output checked, Stop, "Open in editor" (the code
 // in the test page's editor, not run; bad #js= links refused), screenshots (examples-light,
 // examples-full, examples-dark, examples-phone).
@@ -24,7 +23,7 @@ const chrome = process.env.CHROME || 'chromium-headless'
 const math = (text, more = () => true) => e => e.katex && e.out === text && !e.img && more(e)
 const picture = () => e => e.img > 0 && e.out === '' && e.alt === `Picture: ${e.input}` && !e.katex
 const CASES = [
-  ['Run["rm -rf ~"]', e => e.error.startsWith('NotAllowed') && e.error.includes('System`Run') && !e.katex],
+  ['Integrate[', e => e.error.startsWith('Syntax:') && !e.katex],
   ['Series[Exp[x] Sin[x], {x, 0, 6}]', math('SeriesData[x, 0, {1, 1, 1/3, 0, -1/30, -1/90}, 1, 7, 1]')],
   ['1/0', math('ComplexInfinity', e => e.messages.length === 1 && e.messages[0].startsWith('Power::infy'))],
   // a message with a 200-digit number must wrap, not widen the page (checked at 390 px below)
@@ -57,19 +56,19 @@ const JS_CASES = [
   ["await Promise.resolve()\nnull.x", e => e.lines.length === 1 && e.lines[0][0] === 'out err' && e.lines[0][1].startsWith('Uncaught TypeError:') && e.lines[0][1].endsWith('(line 2)')],
   ["return (", e => e.lines.length === 1 && e.lines[0][0] === 'out err' && e.lines[0][1].startsWith('Uncaught SyntaxError:')],
   // a rejection that the code does not wait for is shown, and the run goes on
-  ["wl('Run[\"ls\"]')\nreturn await wl('1 + 1')", lines(['msg', 'Uncaught (in promise) WolframError: NotAllowed: The request uses symbols that are not allowed. System`Run (line 1)'], ['out result', '2'])],
-  // a refused function reaches the code as a rejection
-  ["try {\n  await wl('Run[\"ls\"]')\n} catch (err) {\n  return [err.name, err.failure, ...err.symbols].join(' ')\n}", lines(['out result', 'WolframError NotAllowed System`Run'])],
-  ["const ok = await wl('2 + 2')\nawait wl(W.Run('id'))", e => e.lines.length === 1 && e.lines[0][1].startsWith('Uncaught WolframError: NotAllowed:') && e.lines[0][1].endsWith('System`Run (line 2)')],
+  ["wl('Integrate[')\nreturn await wl('1 + 1')", lines(['msg', 'Uncaught (in promise) WolframError: Syntax: The input could not be parsed. (line 1)'], ['out result', '2'])],
+  // a failure reaches the code as a rejection
+  ["try {\n  await wl('Integrate[')\n} catch (err) {\n  return [err.name, err.failure].join(' ')\n}", lines(['out result', 'WolframError Syntax'])],
+  ["const ok = await wl('2 + 2')\nawait wl(W.Abort())", lines(['out err', 'Uncaught WolframError: Aborted: The evaluation was aborted. (line 2)'])],
   // the template tag: raw text (\\[Pi] stays), values inserted as InputForm in parentheses
   ["const p = W.Power(W.x, 2)\nconsole.log(await wl`Solve[${p} == ${4}, x]`)\nreturn wl`N[\\[Pi], ${20}]`",
     e => e.katex === 1 && e.shown[0].startsWith('3.14159265358979323846') && e.shown[0].endsWith('`20.') && JSON.stringify(e.lines[0]) === '["out","{{x -> -2}, {x -> 2}}"]'],
   ["return toJS(await wl('{1, 2.5, True, <|\"a\" -> Null|>, N[{{1, 2}, {3, 4}}]}'))", lines(['out result', '[1, 2.5, true, {a: null}, [[1, 2], [3, 4]]]'])],
   ["return [typeof (W.x * 2), typeof (W.x + 1)]", lines(['out result', '["number", "string"]'])],   // no operator translation
-  // too many console lines: 1000 shown, then a count of the dropped ones
-  ["for (let i = 0; i < 5000; i++) console.log(i)", e => e.lines.length === 1001 && e.lines[999][1] === '999' && e.lines[1000][1] === '… 4000 more lines dropped'],
+  // every console line, and long and nested values, are shown whole
+  ["for (let i = 0; i < 5000; i++) console.log(i)", e => e.lines.length === 5000 && e.lines[4999][1] === '4999'],
+  ["console.log('z'.repeat(50000))\nreturn Array(500).fill(7)", e => e.lines[0][1].length === 50000 && e.lines[1][1] === JSON.stringify(Array(500).fill(7)).replaceAll(',', ', ')],
   // a result changed in place is evaluated again; one that did not change is shown from its reply
-  // (a plot's Graphics could not be sent back: it has options outside the allowlist)
   ["const r = await wl('{x, y}')\nr.push(W.z)\nreturn r", e => e.shown.length === 1 && e.shown[0] === '{x, y, z}' && e.meta.startsWith('2 kernel evaluations ·')],
   ["const r = await wl('{x, y}')\nr.reverse()\nawait show(r)", e => e.shown.length === 1 && e.shown[0] === '{y, x}' && e.meta.startsWith('2 kernel evaluations ·')],
   ["const p = await wl('Plot[Sin[x], {x, 0, 6}]')\nreturn p", e => e.imgs.length === 1 && e.imgs[0] > 0 && e.meta.startsWith('1 kernel evaluation ·')],
@@ -80,30 +79,19 @@ const JS_CASES = [
     e => e.lines.length === 1 && e.lines[0][0] === 'out result' && e.lines[0][1].startsWith('rejected: ')],
   // templates: a rule on a rule's left side keeps its parentheses; control characters reach the kernel
   ["return [await wl`Part[${W.Rule(W.Rule(1, 2), 3)}, 1]`, (await wl`${'a\\u0001b'}`).length]", e => e.shown[0] === '{1 -> 2, 3}'],
-  // a request larger than the page takes is refused in the worker, not sent
-  ["await wl(new Uint8Array(9 * 1024 ** 2))", e => e.lines.length === 1 && e.lines[0][1].startsWith('Uncaught RangeError: a request must be at most 8388608 bytes') && e.meta.startsWith('0 kernel evaluations')],
-  // at most 50 results shown in a run (here from the reply of one evaluation)
-  ["const r = await wl('x^2')\nfor (let i = 0; i < 60; i++) await show(r)",
-    e => e.katex === 50 && JSON.stringify(e.lines) === '[["meta","… further results not shown (at most 50 in a run)"]]' && e.meta.startsWith('1 kernel evaluation ·')],
-  // a returned value that the kernel refuses: the failure shown once, where the result would be
-  ["return W.Grid([[1, 2]])", e => e.lines.length === 0 && e.shown.length === 1 && e.shown[0].startsWith('NotAllowed:') && e.shown[0].endsWith('System`Grid')],
-  ["await show(W.Grid([[1, 2]]))\nreturn 'not reached'", e => e.lines.length === 0 && e.shown.length === 1 && e.shown[0].startsWith('NotAllowed:')],
+  // a large request, and many results
+  ["return (await wl(W.Length(new Uint8Array(9 * 1024 ** 2))))", lines(['out result', '9437184'])],
+  ["const r = await wl('x^2')\nfor (let i = 0; i < 60; i++) await show(r)", e => e.katex === 60 && e.lines.length === 0 && e.meta.startsWith('1 kernel evaluation ·')],
+  ["return await Promise.all(Array.from({ length: 40 }, (_, i) => wl(W.Plus(i, 1)))).then(a => a.at(-1))", e => lines(['out result', '40'])(e) && e.meta.startsWith('40 kernel evaluations ·')],
+  // a returned value that fails: the failure shown once, where the result would be
+  ["return W.Abort()", e => e.lines.length === 0 && e.shown.length === 1 && e.shown[0].startsWith('Aborted:')],
+  ["await show(W.Abort())\nreturn 'not reached'", e => e.lines.length === 0 && e.shown.length === 1 && e.shown[0].startsWith('Aborted:')],
   // ... and a caught one is still an error for the code
-  ["try {\n  await show(W.Grid([[1, 2]]))\n} catch (err) {\n  return err.failure\n}", e => lines(['out result', 'NotAllowed'])(e) && e.shown.length === 1],
+  ["try {\n  await show(W.Abort())\n} catch (err) {\n  return err.failure\n}", e => lines(['out result', 'Aborted'])(e) && e.shown.length === 1],
+  ["return W.Grid([[1, 2]])", e => e.shown.length === 1 && e.shown[0] === 'Grid[{{1, 2}}]'],
   // the page shows only replies it got from the kernel for the run, never bytes from the worker
   ["return await new Promise(resolve => {\n  self.addEventListener('message', e => { if (e.data.type === 'rendered' && e.data.id === -1) resolve(e.data.ok) })\n  self.postMessage({ type: 'render', id: -1, of: 1e6, bytes: new Uint8Array(64), label: 'fake' })\n})",
     e => lines(['out result', 'false'])(e) && e.shown.length === 0],
-]
-
-// code that bypasses js-runner.js and posts messages itself: the page ends the run, and stays responsive
-const HOSTILE_CASES = [
-  ["for (;;) self.postMessage({ type: 'console', level: 'log', text: 'x' })",
-    e => e.lines.length === 1002 && e.lines[1000][1].endsWith('more lines dropped') && e.lines[1001][1].startsWith('The run sent more than 5000 messages at once')],
-  ["for (;;) self.postMessage({ type: 'nonsense', text: 'y'.repeat(100000) })", e => e.lines.length === 1 && e.lines[0][1].startsWith('The run sent more than 5000 messages at once')],
-  ["for (let i = 1; i <= 9; i++) self.postMessage({ type: 'eval', id: 1e6 + i, bytes: new Uint8Array([56, 58, 67, 1]) })\nawait new Promise(r => setTimeout(r, 10000))",
-    lines(['out err', 'The run sent more than 8 requests at once: ended.'])],
-  ["self.postMessage({ type: 'eval', id: 1, bytes: new Uint8Array(9 * 1024 ** 2) })\nawait new Promise(r => setTimeout(r, 10000))",
-    lines(['out err', 'The run sent a request of more than 8388608 bytes: ended.'])],
 ]
 
 let failed = 0
@@ -223,16 +211,6 @@ try {
       await startJS(code)
       const entry = await jsEntry()
       check(entry.code === code && entry.state === 'done' && test(entry), `${build}: JavaScript ${JSON.stringify(code).slice(1, 70)}`, JSON.stringify(entry).slice(0, 600))
-    }
-    for (const [code, test] of HOSTILE_CASES) {
-      await startJS(code)
-      const entry = await jsEntry()
-      const started = performance.now()
-      await js('1')
-      const ping = performance.now() - started
-      const left = await workersLeft()
-      check(entry.state === 'failed' && test(entry) && ping < 1000 && left === 0, `${build}: JavaScript (hostile) ${JSON.stringify(code).slice(1, 70)}`,
-        `${entry.state}, ${entry.lines.length} lines, ${JSON.stringify(entry).slice(-300)}, page answered in ${Math.round(ping)} ms, ${left} workers left`)
     }
     // the code runs in a worker: no DOM, and nothing it can reach holds the token
     await startJS(`return JSON.stringify([typeof document, typeof window, location.href, self.name,
@@ -360,17 +338,15 @@ try {
       document.getElementById('go').disabled]`)
     check(editor[0] === 'js' && editor[1] === example.code && editor[2] === 0 && editor[3] === '' && editor[4] && editor[5] === 'Run' && editor[6] === false,
       `${build}: Open in editor fills the JavaScript editor without running it, and drops the fragment`, JSON.stringify(editor).slice(0, 300))
-    // links that are malformed or too long are refused with a notice; the editor keeps its text
+    // a malformed link is refused with a notice; the editor keeps its text
     const base = `${new URL('index.html', url).href}${new URL(examplesUrl(build)).search}`
-    for (const [fragment, expected, what] of [['#js=%E0%A4%A', 'malformed', 'that does not decode'],
-      [`#js=${'a'.repeat(20001)}`, 'too long (20001 characters', 'with more than 20000 characters of code'],
-      [`#js=${'%41'.repeat(70000)}`, 'too long (at most', 'too long to decode']]) {
+    for (const [fragment, expected, what] of [['#js=%E0%A4%A', 'malformed', 'that does not decode']]) {
       await send('Page.navigate', { url: 'about:blank' })
       await open(base + fragment, build)
       await sleep(300)
       const refused = await js(`[document.getElementById('notice').hidden, document.getElementById('notice').textContent, document.getElementById('input').value,
         document.querySelectorAll('.entry').length, location.hash]`)
-      check(refused[0] === false && refused[1].includes(expected) && !refused[2].startsWith('a'.repeat(100)) && !refused[2].startsWith('AAAA') && refused[3] === 0 && refused[4] === '',
+      check(refused[0] === false && refused[1].includes(expected) && refused[3] === 0 && refused[4] === '',
         `${build}: a #js= link ${what} is refused with a notice`, JSON.stringify(refused).slice(0, 300))
     }
   }
@@ -396,9 +372,8 @@ try {
       e.katex === 1 && e.shown[0].startsWith('{{3, 1}, {5, 2}, {7, 1}, {11, 1}') && e.shown[0].endsWith('{5738108801, 1}}'),
     contfrac: e => e.lines.length === 13 && e.lines[0][1] === 'π = [3; 7, 15, 1, 292, 1, 1, 1, 2, 1, 3, 1]' && /^355\/113 +2\.7e-7$/.test(e.lines[4][1]) &&
       e.imgs.length === 1 && e.imgs[0] > 0,
-    errors: e => e.lines.length === 5 && e.lines.slice(0, 3).every(([cls]) => cls === 'msg') && e.lines[0][1].endsWith('System`Run') &&
-      e.lines[1][1].startsWith('Syntax:') && e.lines[2][1].endsWith('System`Import') && e.lines[3][1] === '{ComplexInfinity, -Infinity}' &&
-      e.lines[4][1].startsWith('Power::infy'),
+    errors: e => e.lines.length === 4 && e.lines.slice(0, 2).every(([cls]) => cls === 'msg') && e.lines[0][1].startsWith('Syntax:') &&
+      e.lines[1][1].startsWith('Aborted:') && e.lines[2][1] === '{ComplexInfinity, -Infinity}' && e.lines[3][1].startsWith('Power::infy'),
   }
 
   const examplesShots = async () => {

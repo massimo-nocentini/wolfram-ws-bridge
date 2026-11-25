@@ -2,5 +2,4 @@
 !requirements.txt
 !server/bridge.py
 !kernel/WSBridge.wl
-!kernel/allowlist.txt
 !web/
